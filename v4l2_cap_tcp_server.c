@@ -28,7 +28,7 @@ struct buffer {
     size_t length;
 };
 struct buffer buffers[BUFFER_COUNT];
-// struct v4l2_buffer buf;                     // V4L2에서 사용할 메모리 버퍼
+struct v4l2_buffer buf;                     // V4L2에서 사용할 메모리 버퍼
 static int cond = 1;
 //프레임 버퍼에 대한 다양한 화면 속성 정보를 담고있다.
 //xres, yres, xres_virtual, yres_virtual
@@ -134,7 +134,6 @@ static int init_v4l2(int *fd, struct buffer *buffers)
 
     return 0;
 }
-
 void* client_handler(void* arg){
     int client_fd = *((int *)arg);
     free(arg);
@@ -209,7 +208,6 @@ int main(int argc, char** argv)
         fprintf(stderr, "V4L2 initialization failed\n");
         return -1;
     }
-
     int server_fd = server_setup();
     if(server_fd < 0){
 	perror("server setup failed\n");
@@ -238,7 +236,7 @@ int main(int argc, char** argv)
         }
         
         // YUYV 데이터를 RGB565로 변환
-	printf("buf.index: %d\n", buf.index);
+	// printf("buf.index: %d\n", buf.index);
 
         // 버퍼를 다시 큐에 넣기
         if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0) {
