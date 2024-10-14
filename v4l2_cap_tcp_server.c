@@ -34,6 +34,75 @@ static int cond = 1;
 //xres, yres, xres_virtual, yres_virtual
 //bits_per_pixel: 한 픽셀을 표현하는 데 사용되는 비트수(e.g. 16, 24, 32 비트)
 
+static void sigHandler(int signo);
+static int init_v4l2(int *fd, struct buffer *buffers);
+static void* client_handler(void* arg);
+static void* server_handler(void* arg);
+static int server_setup();
+
+int main(int argc, char** argv) 
+{
+    int cam_fd;
+    signal(SIGINT, sigHandler);
+
+    // V4L2 초기화
+    if (init_v4l2(&cam_fd, buffers) < 0) {
+        fprintf(stderr, "V4L2 initialization failed\n");
+        return -1;
+    }
+    int server_fd = server_setup();
+    if(server_fd < 0){
+	perror("server setup failed\n");
+	return -1;
+    }
+
+    pthread_t server_thread;
+    pthread_create(&server_thread, NULL, server_handler, &server_fd);
+
+    int addrlen = sizeof(struct sockaddr_in);
+    struct sockaddr_in client_addr;
+
+    // V4L2를 이용한 영상의 캡쳐 및 표시
+    while (cond) {
+        // 버퍼 초기화
+        memset(&buf, 0, sizeof(buf));
+
+        // MMAP 기반으로 영상 캡쳐
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+
+	// STREAMON 명령으로 캡쳐한 비디오 프레임을 디큐한다. 
+        if (ioctl(cam_fd, VIDIOC_DQBUF, &buf) < 0) {
+            perror("Failed to dequeue buffer");
+            break;
+        }
+        
+        // YUYV 데이터를 RGB565로 변환
+	// printf("buf.index: %d\n", buf.index);
+
+        // 버퍼를 다시 큐에 넣기
+        if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0) {
+            perror("Failed to queue buffer");
+            break;
+        }
+    }
+
+    printf("\nGood Bye!!!\n");
+
+    // 캡쳐 종료
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    ioctl(cam_fd, VIDIOC_STREAMOFF, &type);
+
+    // 메모리 정리
+    for (int i = 0; i < BUFFER_COUNT; i++) {
+        munmap(buffers[i].start, buffers[i].length);
+    }
+
+    // 파일디스크립터 정리
+    close(cam_fd);
+
+    return 0;
+}
 static void sigHandler(int signo)
 {
     cond = 0;
@@ -134,7 +203,8 @@ static int init_v4l2(int *fd, struct buffer *buffers)
 
     return 0;
 }
-void* client_handler(void* arg){
+void* client_handler(void* arg)
+{
     int client_fd = *((int *)arg);
     free(arg);
 
@@ -148,7 +218,8 @@ void* client_handler(void* arg){
     return NULL;
 }
 
-void* server_handler(void* arg){
+void* server_handler(void* arg)
+{
     int server_fd = *((int *)arg);
     struct sockaddr_in client_addr;
     socklen_t addrlen = sizeof(client_addr);
@@ -170,7 +241,8 @@ void* server_handler(void* arg){
     return NULL;
 }
 
-int server_setup(){
+int server_setup()
+{
     int server_fd;
     struct sockaddr_in server_addr;
 
@@ -198,66 +270,3 @@ int server_setup(){
     return server_fd;
 }
 
-int main(int argc, char** argv) 
-{
-    int cam_fd;
-    signal(SIGINT, sigHandler);
-
-    // V4L2 초기화
-    if (init_v4l2(&cam_fd, buffers) < 0) {
-        fprintf(stderr, "V4L2 initialization failed\n");
-        return -1;
-    }
-    int server_fd = server_setup();
-    if(server_fd < 0){
-	perror("server setup failed\n");
-	return -1;
-    }
-
-    pthread_t server_thread;
-    pthread_create(&server_thread, NULL, server_handler, &server_fd);
-
-    int addrlen = sizeof(struct sockaddr_in);
-    struct sockaddr_in client_addr;
-
-    // V4L2를 이용한 영상의 캡쳐 및 표시
-    while (cond) {
-        // 버퍼 초기화
-        memset(&buf, 0, sizeof(buf));
-
-        // MMAP 기반으로 영상 캡쳐
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-
-	// STREAMON 명령으로 캡쳐한 비디오 프레임을 디큐한다. 
-        if (ioctl(cam_fd, VIDIOC_DQBUF, &buf) < 0) {
-            perror("Failed to dequeue buffer");
-            break;
-        }
-        
-        // YUYV 데이터를 RGB565로 변환
-	// printf("buf.index: %d\n", buf.index);
-
-        // 버퍼를 다시 큐에 넣기
-        if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("Failed to queue buffer");
-            break;
-        }
-    }
-
-    printf("\nGood Bye!!!\n");
-
-    // 캡쳐 종료
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(cam_fd, VIDIOC_STREAMOFF, &type);
-
-    // 메모리 정리
-    for (int i = 0; i < BUFFER_COUNT; i++) {
-        munmap(buffers[i].start, buffers[i].length);
-    }
-
-    // 파일디스크립터 정리
-    close(cam_fd);
-
-    return 0;
-}
