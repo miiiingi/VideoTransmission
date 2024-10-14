@@ -133,23 +133,6 @@ int init_framebuffer(unsigned short **fbPtr, int *size)
     return fd;
 }
 
-void draw_framebuffer(int fb_fd, unsigned short *fbPtr, unsigned short *rgbBuffer, int fbSize, int *currentBuffer){
-    int location = (*currentBuffer) * vinfo.yres * vinfo.xres;
-
-    memset(fbPtr + location, 0, fbSize / 2);
-
-    memcpy(fbPtr + location, rgbBuffer, fbSize / 2);
-
-    vinfo.yoffset = (*currentBuffer) * vinfo.yres;
-
-    if(ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo)){
-	perror("Failed to panning display");
-    }
-
-    *currentBuffer = (*currentBuffer) ? 0: 1;
-
-}
-
 int main(int argc, char** argv) 
 {
     signal(SIGINT, sigHandler);
@@ -218,8 +201,6 @@ int main(int argc, char** argv)
 
         printf("Received %zd bytes from server\n", bytes_received);
         yuyv2Rgb565(buffer, rgbBuffer, WIDTH, HEIGHT);
-
-	// draw_framebuffer(fb_fd, fbPtr, rgbBuffer, fbSize, &currentBuffer);
 
         // 프레임버퍼에 RGB565 데이터 쓰기
         memcpy(fbPtr, rgbBuffer, fbSize); 
