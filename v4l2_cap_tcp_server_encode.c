@@ -15,6 +15,11 @@
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>  // AVFormatContext, avformat_alloc_output_context2, av_interleaved_write_frame
+#include <libavformat/avio.h>      // AVIOContext, avio_open, avio_close
+#include <libavutil/avutil.h>      // 기본 유틸리티 함수
+
 
 #define WIDTH 		    800
 #define HEIGHT 		    600  
@@ -48,9 +53,16 @@ static int convert_yuyv422_to_yuv420p(uint8_t *input_data, uint8_t **output_data
 void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width, int height);
 void save_framebuffer_as_bmp(const char *filename, unsigned short *fbPtr, int width, int height);
 void yuyv2Rgb565(uchar *yuyv, unsigned short *fbPtr, int width, int height);
+// H.264 인코딩을 위한 함수 선언
+static int init_h264_encoder(AVCodecContext **enc_ctx, AVCodec **codec);
+static int encode_frame(AVCodecContext *enc_ctx, AVFrame *frame, AVPacket *pkt, FILE *outfile);
+void save_h264_encoded_frame_as_bmp(AVCodecContext *enc_ctx, AVFrame *frame, const char *filename);
+void save_to_mp4(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt);
+
 int main(int argc, char** argv) 
 {
     int cam_fd;
+    printf("=========================start========================\n");
     signal(SIGINT, sigHandler);
 
     // V4L2 초기화
@@ -58,6 +70,24 @@ int main(int argc, char** argv)
         fprintf(stderr, "V4L2 initialization failed\n");
         return -1;
     }
+    
+    /*
+    // H.264 인코더 초기화
+    AVCodecContext *enc_ctx;
+    AVCodec *codec;
+    if (init_h264_encoder(&enc_ctx, &codec) < 0) {
+	perror("H.264 Encoder Initialization Failed");
+        return -1;
+    }
+   
+    // H.264 파일을 저장할 파일 포인터
+    FILE *outfile = fopen("output.h264", "wb");
+    if (!outfile) {
+        perror("Failed to open output file");
+        return -1;
+    }
+    */
+
     int server_fd = server_setup();
     if(server_fd < 0){
 	perror("server setup failed\n");
@@ -66,6 +96,15 @@ int main(int argc, char** argv)
 
     pthread_t server_thread;
     pthread_create(&server_thread, NULL, server_handler, &server_fd);
+
+    /*
+    // V4L2를 이용한 영상의 캡쳐 및 표시
+    AVPacket *pkt = av_packet_alloc();  // H.264 인코딩에 사용할 패킷
+    if (!pkt) {
+        perror("Failed to allocate packet");
+        return -1;
+    }
+    */
 
     int addrlen = sizeof(struct sockaddr_in);
     struct sockaddr_in client_addr;
@@ -213,6 +252,8 @@ static int init_v4l2(int *fd, struct buffer *buffers)
 }
 
 void* client_handler(void* arg) {
+    printf("==============================250================================\n");
+    fflush(stdout);
     int client_fd = *((int *)arg);
     free(arg);
 
@@ -233,11 +274,14 @@ void* client_handler(void* arg) {
 	av_frame_free(&pFrameIn);
 	return NULL;
     }
+    printf("==============================269================================\n");
+    fflush(stdout);
 
     AVFrame *pFrameOut = av_frame_alloc();
     if(!pFrameOut){
 	perror("pFrameOut Allocation Failed");
 	av_frame_free(&pFrameIn);
+	av_frame_free(&pFrameOut);
 	return NULL;
     }
     pFrameOut->format = AV_PIX_FMT_YUV420P;
@@ -248,38 +292,141 @@ void* client_handler(void* arg) {
 	av_frame_free(&pFrameIn);
 	av_frame_free(&pFrameOut);
     }
+    printf("==============================286================================\n");
+    fflush(stdout);
 
+    /*
+     * yuyv 데이터를 yuv420p로 변환하는 context를 선언해줌
+     */
     struct SwsContext *sws_ctx = sws_getContext(WIDTH, HEIGHT, AV_PIX_FMT_YUYV422, WIDTH, HEIGHT, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
     if(!sws_ctx){
 	av_frame_free(&pFrameIn);
 	av_frame_free(&pFrameOut);
 	return NULL;
     }
+    printf("==============================294================================\n");
+    fflush(stdout);
 
     uint8_t *yuv420p_data[3];
     yuv420p_data[0] = malloc(WIDTH * HEIGHT);                  // Y plane
     yuv420p_data[1] = malloc((WIDTH / 2) * (HEIGHT / 2));      // U plane
     yuv420p_data[2] = malloc((WIDTH / 2) * (HEIGHT / 2));      // V plane
-
-    while (cond) {
-        if (convert_yuyv422_to_yuv420p(buffers[buf.index].start, yuv420p_data, WIDTH, HEIGHT, sws_ctx, pFrameIn, pFrameOut) == 0) {
-            int sent_y = send(client_fd, yuv420p_data[0], WIDTH * HEIGHT, 0);                   // Y plane
-            int sent_u = send(client_fd, yuv420p_data[1], (WIDTH / 2) * (HEIGHT / 2), 0);       // U plane
-            int sent_v = send(client_fd, yuv420p_data[2], (WIDTH / 2) * (HEIGHT / 2), 0);       // V plane
-	    // 로그 추가
-	    printf("Sent YUV420P data: Y = %d, U = %d, V = %d\n", sent_y, sent_u, sent_v);
-        }
-	save_yuv420p_as_bmp("yuv420p_frame.bmp", pFrameOut, WIDTH, HEIGHT);
+							       //
+    /*
+     * yuv420p에서 h.264로 변환하기 위한 코덱 정의
+     */
+    AVCodecContext *enc_ctx;
+    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    if (!codec) {
+        fprintf(stderr, "H.264 codec not found\n");
+        return NULL;
     }
 
+    /*
+     * 위에서 정한 코덱을 통해서 인코딩 하는 컨텍스트 정의 및 생성
+     */
+    enc_ctx = avcodec_alloc_context3(codec);
+    if (!enc_ctx) {
+        fprintf(stderr, "Could not allocate video codec context\n");
+        return NULL;
+    }
+    
+    enc_ctx->bit_rate = 400000;  // 비트레이트 설정
+    enc_ctx->width = WIDTH;
+    enc_ctx->height = HEIGHT;
+    enc_ctx->time_base = (AVRational){1, 25};  // 25 fps
+    enc_ctx->framerate = (AVRational){25, 1};
+    enc_ctx->gop_size = 10;  // GOP 크기 설정 (10 프레임마다 키프레임)
+    enc_ctx->max_b_frames = 1;
+    enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    
+    printf("==============================322================================\n");
+    fflush(stdout);
+    /*
+     * 위에서 정한 코덱과 인코딩 컨텍스트를 연다.
+     */
+    if (avcodec_open2(enc_ctx, codec, NULL) < 0) {
+        fprintf(stderr, "Could not open H.264 codec\n");
+        avcodec_free_context(&enc_ctx);
+        return NULL;
+    }
+    printf("==============================339================================\n");
+    fflush(stdout);
 
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt) {
+        fprintf(stderr, "Could not allocate packet\n");
+        avcodec_free_context(&enc_ctx);
+        return NULL;
+    }
+    printf("==============================348================================\n");
+    fflush(stdout);
+
+    while (cond) {
+	/*
+	 * buffers[buf.index].start: yuyv 데이터가 들어있음.
+	 * yuv420p_data: yuyv로부터 변환된 yuv420p을 담을 버퍼.
+	 * pFrameIn: yuyv를 담을 버퍼 buffers[buf.index].start에 담긴 데이터를 복사한다.
+	 * pFrameOut: yuv420p를 담을 버퍼 yuv_420p_data에 담긴 데이터를 복사한다.
+	 */
+        if (convert_yuyv422_to_yuv420p(buffers[buf.index].start, yuv420p_data, WIDTH, HEIGHT, sws_ctx, pFrameIn, pFrameOut) == 0) {
+	    printf("==============================353================================\n");
+	    fflush(stdout);
+	    /*
+	     * 위에서 정한 인코딩 컨텍스트를 이용해서 pFrameOut에 담긴 yuv420p 데이터를 인코딩한다. 
+	     */
+	        // 변환된 pFrameOut의 크기와 형식 출력
+	    printf("pFrameOut width: %d, height: %d, format: %d\n", pFrameOut->width, pFrameOut->height, pFrameOut->format);
+	    printf("pFrameOut Y size: %d, U size: %d, V size: %d\n", pFrameOut->linesize[0], pFrameOut->linesize[1], pFrameOut->linesize[2]);
+
+	    if(avcodec_send_frame(enc_ctx, pFrameOut) < 0){
+		perror("Error Sending Frame To Encoder\n");
+		break;
+	    }
+	    /*
+	    if (pkt->size > 0) {
+	    int sent_bytes = send(client_fd, pkt->data, pkt->size, 0);
+		if (sent_bytes <= 0) {
+		    perror("Error sending data");
+		} else {
+		    printf("Sent %d bytes to client\n", sent_bytes);
+		}
+	    } else {
+		printf("No data to send\n");
+	    }
+	    */
+	    // MP4 파일로 저장하기 위한 AVFormatContext 설정
+	    // AVFormatContext *fmt_ctx = NULL;
+	    // avformat_alloc_output_context2(&fmt_ctx, NULL, NULL, "output.mp4");
+	    /*
+	    while (avcodec_receive_packet(enc_ctx, pkt) == 0) {
+		printf("Encoded packet size: %d\n", pkt->size);
+		
+		// 클라이언트로 인코딩된 패킷 전송
+		int sent_bytes = send(client_fd, pkt->data, pkt->size, 0);
+		printf("Sent H.264 data: %d bytes\n", sent_bytes);
+		// BMP 이미지로 H.264 인코딩된 결과를 저장
+		// save_h264_encoded_frame_as_bmp(enc_ctx, pFrameOut, "encoded_frame.bmp");
+
+		// av_interleaved_write_frame(fmt_ctx, pkt);  // 패킷을 MP4 파일에 씀
+		av_packet_unref(pkt);  // 패킷 해제
+	    }
+	    */
+	    save_to_mp4(client_fd, enc_ctx, pkt);
+	    // 파일 닫기
+	    // av_write_trailer(fmt_ctx);
+	    // avformat_free_context(fmt_ctx);
+        }
+    }
+
+    av_packet_free(&pkt);
     free(yuv420p_data[0]);
     free(yuv420p_data[1]);
     free(yuv420p_data[2]);
     av_frame_free(&pFrameIn);
     av_frame_free(&pFrameOut);
+    avcodec_free_context(&enc_ctx);
     sws_freeContext(sws_ctx);
-
     close(client_fd);
     return NULL;
 }
@@ -299,7 +446,12 @@ void* server_handler(void* arg)
         }
 
 	pthread_t tid;
-	pthread_create(&tid, NULL, client_handler, client_fd);
+	int thread_status = pthread_create(&tid, NULL, client_handler, client_fd);
+	if (thread_status != 0) {
+	    perror("pthread_create failed");
+	} else {
+	    printf("Thread created successfully\n");
+	}
 	pthread_detach(tid);
     }
 
@@ -339,10 +491,14 @@ int server_setup()
 // YUYV422 → YUV420P 변환을 위한 FFmpeg 사용 함수
 int convert_yuyv422_to_yuv420p(uint8_t *input_data, uint8_t **output_data, int width, int height, struct SwsContext *sws_ctx, AVFrame *pFrameIn, AVFrame *pFrameOut) {
     // 입력 프레임에 YUYV422 데이터 설정
+    printf("==============================460================================\n");
+    fflush(stdout);
     if (av_image_fill_arrays(pFrameIn->data, pFrameIn->linesize, input_data, AV_PIX_FMT_YUYV422, width, height, 1) < 0) {
         fprintf(stderr, "YUYV422 데이터 설정 실패\n");
         return -1;
     }
+    printf("==============================466================================\n");
+    fflush(stdout);
 
     // YUV420P로 변환
     if (sws_scale(
@@ -356,6 +512,8 @@ int convert_yuyv422_to_yuv420p(uint8_t *input_data, uint8_t **output_data, int w
         fprintf(stderr, "YUYV422 to YUV420P 변환 실패\n");
         return -1;
     }
+    printf("==============================481================================\n");
+    fflush(stdout);
 
     // 변환된 YUV420P 데이터 할당 및 복사
     int y_size = width * height;
@@ -436,5 +594,130 @@ void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width
     av_frame_free(&rgb_frame);
     sws_freeContext(img_convert_ctx);
 }
+// H.264 인코딩된 결과를 BMP 이미지로 저장하는 함수 추가
+void save_h264_encoded_frame_as_bmp(AVCodecContext *enc_ctx, AVFrame *frame, const char *filename) {
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt) {
+        fprintf(stderr, "Failed to allocate AVPacket\n");
+        return;
+    }
 
+    // 인코딩된 프레임 전송
+    if (avcodec_send_frame(enc_ctx, frame) < 0) {
+        fprintf(stderr, "Error sending frame for encoding\n");
+        av_packet_free(&pkt);
+        return;
+    }
 
+    // 인코딩된 패킷 수신
+    while (avcodec_receive_packet(enc_ctx, pkt) == 0) {
+        // H.264 패킷을 디코딩하여 프레임을 복원하고 BMP로 저장
+        AVCodecContext *dec_ctx = avcodec_alloc_context3(NULL);
+        if (!dec_ctx) {
+            fprintf(stderr, "Could not allocate decoder context\n");
+            av_packet_free(&pkt);
+            return;
+        }
+
+        // H.264 디코더 찾기
+        const AVCodec *decoder = avcodec_find_decoder(AV_CODEC_ID_H264);
+        if (!decoder) {
+            fprintf(stderr, "H.264 decoder not found\n");
+            avcodec_free_context(&dec_ctx);
+            av_packet_free(&pkt);
+            return;
+        }
+
+        if (avcodec_open2(dec_ctx, decoder, NULL) < 0) {
+            fprintf(stderr, "Could not open H.264 decoder\n");
+            avcodec_free_context(&dec_ctx);
+            av_packet_free(&pkt);
+            return;
+        }
+
+        // 디코딩된 프레임을 BMP로 저장
+        AVFrame *decoded_frame = av_frame_alloc();
+        if (!decoded_frame) {
+            fprintf(stderr, "Failed to allocate decoded frame\n");
+            avcodec_free_context(&dec_ctx);
+            av_packet_free(&pkt);
+            return;
+        }
+
+        if (avcodec_send_packet(dec_ctx, pkt) == 0) {
+            while (avcodec_receive_frame(dec_ctx, decoded_frame) == 0) {
+                save_yuv420p_as_bmp(filename, decoded_frame, frame->width, frame->height);
+            }
+        }
+
+        av_frame_free(&decoded_frame);
+        avcodec_free_context(&dec_ctx);
+    }
+
+    av_packet_free(&pkt);
+}
+void save_to_mp4(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt) {
+    AVFormatContext *fmt_ctx = NULL;
+    AVStream *stream = NULL;
+
+    // MP4 파일로 저장하기 위한 포맷 컨텍스트 생성
+    if (avformat_alloc_output_context2(&fmt_ctx, NULL, NULL, "output.mp4") < 0) {
+        fprintf(stderr, "Could not allocate output format context\n");
+        return;
+    }
+
+    // 파일을 쓰기 모드로 엽니다.
+    if (avio_open(&fmt_ctx->pb, "output.mp4", AVIO_FLAG_WRITE) < 0) {
+        fprintf(stderr, "Could not open output file\n");
+        avformat_free_context(fmt_ctx);
+        return;
+    }
+
+    // 새 스트림 추가 (비디오 스트림)
+    stream = avformat_new_stream(fmt_ctx, enc_ctx->codec);
+    if (!stream) {
+        fprintf(stderr, "Could not create new stream\n");
+        avio_close(fmt_ctx->pb);
+        avformat_free_context(fmt_ctx);
+        return;
+    }
+    stream->time_base = (AVRational){1, 25}; // 타임베이스 설정 (25fps 기준)
+
+    // 코덱 파라미터 복사
+    if (avcodec_parameters_from_context(stream->codecpar, enc_ctx) < 0) {
+        fprintf(stderr, "Could not copy codec parameters\n");
+        avio_close(fmt_ctx->pb);
+        avformat_free_context(fmt_ctx);
+        return;
+    }
+
+    // 파일 헤더 작성
+    if (avformat_write_header(fmt_ctx, NULL) < 0) {
+        fprintf(stderr, "Error writing header to file\n");
+        avio_close(fmt_ctx->pb);
+        avformat_free_context(fmt_ctx);
+        return;
+    }
+
+    // 패킷을 MP4 파일로 기록
+    while (avcodec_receive_packet(enc_ctx, pkt) == 0) {
+        pkt->stream_index = stream->index;  // 패킷이 어느 스트림에 속하는지 설정
+        pkt->pts = pkt->dts = AV_NOPTS_VALUE; // 타임스탬프가 없다면 설정
+	int sent_bytes = send(client_fd, pkt->data, pkt->size, 0);
+	printf("Sent H.264 data: %d bytes\n", sent_bytes);
+        if (av_interleaved_write_frame(fmt_ctx, pkt) < 0) {
+            fprintf(stderr, "Error writing frame\n");
+            break;
+        }
+        av_packet_unref(pkt);
+    }
+
+    // 파일 끝내기
+    if (av_write_trailer(fmt_ctx) < 0) {
+        fprintf(stderr, "Error writing trailer to file\n");
+    }
+
+    // 파일 닫기 및 리소스 해제
+    avio_close(fmt_ctx->pb);
+    avformat_free_context(fmt_ctx);
+}
