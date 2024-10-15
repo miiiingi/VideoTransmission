@@ -419,11 +419,16 @@ void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width
     fwrite(bmpfileheader, 1, 14, f);
     fwrite(bmpinfoheader, 1, 40, f);
 
-    // 상하 반전된 픽셀 데이터를 저장
+    // 상하 반전된 픽셀 데이터를 저장하면서 RGB -> BGR 변환
     for (int i = height - 1; i >= 0; i--) {
-        fwrite(rgb_frame->data[0] + i * rgb_frame->linesize[0], 1, 3 * width, f);
+        uint8_t *row_ptr = rgb_frame->data[0] + i * rgb_frame->linesize[0];
+        for (int j = 0; j < width; j++) {
+            // RGB 값을 BGR로 변환하여 저장
+            uint8_t bgr_pixel[3] = {row_ptr[3 * j + 2], row_ptr[3 * j + 1], row_ptr[3 * j]};
+            fwrite(bgr_pixel, 1, 3, f);
+        }
     }
-    
+
     fclose(f);
 
     // 자원 해제
@@ -431,3 +436,5 @@ void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width
     av_frame_free(&rgb_frame);
     sws_freeContext(img_convert_ctx);
 }
+
+
