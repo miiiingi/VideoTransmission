@@ -52,6 +52,8 @@ static void save_framebuffer_as_bmp(const char *filename, unsigned short *fbPtr,
 static void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int height);
 static inline int clip(int value, int min, int max);
 static void sigHandler(int signo);
+static void yuv420p_to_yuyv(AVFrame *frame, unsigned char *yuyv, int width, int height);
+static void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height);
 
 int main(int argc, char** argv) 
 {
@@ -136,7 +138,7 @@ int main(int argc, char** argv)
     int frame_num = 0;
 
     // .h264 파일로 저장할 파일 포인터 열기
-    FILE *h264_file = fopen("received_output.h264", "wb");
+    FILE *h264_file = fopen("received_output2.h264", "wb");
     if (!h264_file) {
         perror("Failed to open output .h264 file");
         close(sock);
@@ -162,7 +164,38 @@ int main(int argc, char** argv)
             fwrite(packet_data, 1, bytes_received, h264_file);
         }
 
+	pkt->size = bytes_received;
+	pkt->data = packet_data;
+	// H.264 디코딩 후 YUV420P 프레임을 BMP로 저장
+	if (decode_and_save_frame(dec_ctx, pkt, frame, frame_num++) < 0) {
+	    fprintf(stderr, "Decoding error or end of stream\n");
+	    break;
+	}
+
         fflush(h264_file);  // 데이터를 즉시 파일로 기록
+	unsigned char *yuyv_data = (unsigned char *)malloc(WIDTH * HEIGHT * 2);  // YUYV는 픽셀당 2바이트
+										 
+	/*
+	 * 아래의 방법을 통해서 해결했는데 왜 그럴까 ?? 이 문제 해결한 방법 찾아보기
+	 */
+	unsigned char *yuyv_copy = (unsigned char *)malloc(WIDTH * HEIGHT * 2);
+	memcpy(yuyv_copy, yuyv_data, WIDTH * HEIGHT * 2);
+	// 메모리 복사 후 특정 위치의 데이터를 확인
+	for (int i = 0; i < 10; i++) {
+	    printf("Original YUYV[%d]: %02X, Copied YUYV[%d]: %02X\n",
+		   i, yuyv_data[i], i, yuyv_copy[i]);
+	}
+	yuv420p_to_yuyv(frame, yuyv_copy, WIDTH, HEIGHT);
+	// YUV420P → YUYV 변환
+
+	// YUYV 데이터를 BMP 파일로 저장
+	// save_yuyv_as_bmp("yuyv_output.bmp", yuyv_copy, WIDTH, HEIGHT);
+	// YUYV → RGB565 변환 후 프레임 버퍼로 출력
+	// yuyv2Rgb565(yuyv_copy, fbPtr, WIDTH, HEIGHT);
+
+	free(yuyv_data);  // 변환된 YUYV 데이터 해제
+	free(yuyv_copy);  // 변환된 YUYV 데이터 해제
+
     }
 
     printf("\nGood Bye!!!\n");
@@ -270,6 +303,11 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
             fprintf(stderr, "Error during decoding\n");
             return ret;
         }
+	// 디코딩된 프레임이 올바른지 확인하는 디버깅 코드 추가
+        if (frame->linesize[0] == 0 || frame->linesize[1] == 0 || frame->linesize[2] == 0) {
+            fprintf(stderr, "Invalid frame received, linesize is 0\n");
+            return -1;
+        }
 
         // YUV420P 프레임을 BMP로 저장
         char filename[1024];
@@ -280,7 +318,6 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
     return 0;
 }
 
-// YUV420 데이터를 BMP 파일로 저장하는 함수
 void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int height) {
     struct SwsContext *img_convert_ctx = sws_getContext(
         width, height, AV_PIX_FMT_YUV420P,
@@ -331,8 +368,8 @@ void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int he
     fwrite(bmpfileheader, 1, 14, f);
     fwrite(bmpinfoheader, 1, 40, f);
 
-    // 픽셀 데이터를 저장
-    for (int y = 0; y < height; y++) {
+    // 픽셀 데이터를 저장할 때 역순으로 저장
+    for (int y = height - 1; y >= 0; y--) {  // 이미지의 각 라인을 아래에서 위로 읽음
         fwrite(rgb_frame->data[0] + y * rgb_frame->linesize[0], 1, 3 * width, f);
     }
 
@@ -341,6 +378,7 @@ void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int he
     av_frame_free(&rgb_frame);
     sws_freeContext(img_convert_ctx);
 }
+
 
 static inline int clip(int value, int min, int max)
 {
@@ -353,4 +391,107 @@ static void sigHandler(int signo)
 }
 
 
+// YUV420P 데이터를 YUYV로 변환하는 함수
+void yuv420p_to_yuyv(AVFrame *frame, unsigned char *yuyv, int width, int height) {
+    printf("=================================378===================\n");
+    fflush(stdout);
+    int y, x;
+    unsigned char *y_plane = frame->data[0];
+    unsigned char *u_plane = frame->data[1];
+    unsigned char *v_plane = frame->data[2];
+    int y_stride = frame->linesize[0];
+    int u_stride = frame->linesize[1];
+    int v_stride = frame->linesize[2];
+    printf("y_stride: %d\n", y_stride);
+    printf("u_stride: %d\n", u_stride);
+    printf("v_stride: %d\n", v_stride);
 
+    if (!y_plane || !u_plane || !v_plane) {
+        fprintf(stderr, "Invalid YUV plane pointers\n");
+        return;
+    }
+
+    if (y_stride == 0 || u_stride == 0 || v_stride == 0) {
+        fprintf(stderr, "Invalid YUV stride\n");
+        return;
+    }
+
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x += 2) {
+            int y_index = y * y_stride + x;
+            int u_index = (y / 2) * u_stride + (x / 2);
+            int v_index = (y / 2) * v_stride + (x / 2);
+
+            // YUYV 포맷으로 변환 (Y0 U Y1 V)
+            yuyv[2 * x] = y_plane[y_index];          // Y0
+            yuyv[2 * x + 1] = u_plane[u_index];      // U
+            yuyv[2 * x + 2] = y_plane[y_index + 1];  // Y1
+            yuyv[2 * x + 3] = v_plane[v_index];      // V
+        }
+        yuyv += width * 2;  // YUYV는 한 픽셀당 2바이트
+    }
+}
+
+// YUYV 데이터를 BMP로 저장하는 함수 추가
+void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height) {
+    FILE *f;
+    unsigned int filesize = 54 + 3 * width * height;  // 54바이트 헤더 + 픽셀 데이터 크기
+
+    unsigned char bmpfileheader[14] = {
+        'B', 'M',              // 매직 넘버
+        filesize & 0xFF, (filesize >> 8) & 0xFF, (filesize >> 16) & 0xFF, (filesize >> 24) & 0xFF,
+        0, 0, 0, 0,            // 예약된 필드
+        54, 0, 0, 0            // 데이터 시작 위치(헤더 크기)
+    };
+    unsigned char bmpinfoheader[40] = {
+        40, 0, 0, 0,           // 정보 헤더 크기
+        width & 0xFF, (width >> 8) & 0xFF, (width >> 16) & 0xFF, (width >> 24) & 0xFF,   // 이미지 너비
+        height & 0xFF, (height >> 8) & 0xFF, (height >> 16) & 0xFF, (height >> 24) & 0xFF,  // 이미지 높이
+        1, 0,                  // 플레인 수
+        24, 0,                 // 비트 수(24 비트)
+        0, 0, 0, 0,            // 압축 방식(없음)
+        0, 0, 0, 0,            // 이미지 크기(비압축)
+        0, 0, 0, 0,            // 수평 해상도
+        0, 0, 0, 0,            // 수직 해상도
+        0, 0, 0, 0,            // 색상 수
+        0, 0, 0, 0             // 중요한 색상 수
+    };
+
+    f = fopen(filename, "wb");
+    fwrite(bmpfileheader, 1, 14, f);
+    fwrite(bmpinfoheader, 1, 40, f);
+
+    // YUYV 데이터를 RGB로 변환하여 BMP로 저장
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x += 2) {
+            // YUYV 포맷에서 Y0 U Y1 V 추출
+            unsigned char y0 = yuyv[2 * x];
+            unsigned char u = yuyv[2 * x + 1];
+            unsigned char y1 = yuyv[2 * x + 2];
+            unsigned char v = yuyv[2 * x + 3];
+
+            // YUV를 RGB로 변환 (Y0 U V)
+            int r = clip((298 * y0 + 409 * v + 128) >> 8, 0, 255);
+            int g = clip((298 * y0 - 100 * u - 208 * v + 128) >> 8, 0, 255);
+            int b = clip((298 * y0 + 516 * u + 128) >> 8, 0, 255);
+
+            // BMP 파일에 픽셀 저장 (BGR 순서)
+            fwrite(&b, 1, 1, f);
+            fwrite(&g, 1, 1, f);
+            fwrite(&r, 1, 1, f);
+
+            // YUV를 RGB로 변환 (Y1 U V)
+            r = clip((298 * y1 + 409 * v + 128) >> 8, 0, 255);
+            g = clip((298 * y1 - 100 * u - 208 * v + 128) >> 8, 0, 255);
+            b = clip((298 * y1 + 516 * u + 128) >> 8, 0, 255);
+
+            // BMP 파일에 두 번째 픽셀 저장 (BGR 순서)
+            fwrite(&b, 1, 1, f);
+            fwrite(&g, 1, 1, f);
+            fwrite(&r, 1, 1, f);
+        }
+        yuyv += width * 2;  // YUYV는 한 픽셀당 2바이트
+    }
+
+    fclose(f);
+}
