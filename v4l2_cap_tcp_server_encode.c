@@ -51,13 +51,7 @@ static void* server_handler(void* arg);
 static int server_setup();
 static int convert_yuyv422_to_yuv420p(uint8_t *input_data, uint8_t **output_data, int width, int height, struct SwsContext *sws_ctx, AVFrame *pFrameIn, AVFrame *pFrameOut);
 void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width, int height);
-void save_framebuffer_as_bmp(const char *filename, unsigned short *fbPtr, int width, int height);
-void yuyv2Rgb565(uchar *yuyv, unsigned short *fbPtr, int width, int height);
 // H.264 인코딩을 위한 함수 선언
-static int init_h264_encoder(AVCodecContext **enc_ctx, AVCodec **codec);
-static int encode_frame(AVCodecContext *enc_ctx, AVFrame *frame, AVPacket *pkt, FILE *outfile);
-void save_h264_encoded_frame_as_bmp(AVCodecContext *enc_ctx, AVFrame *frame, const char *filename);
-void save_to_mp4(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt);
 void save_to_h264(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt, FILE *outfile);
 
 int main(int argc, char** argv) 
