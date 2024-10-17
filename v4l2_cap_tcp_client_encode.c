@@ -53,7 +53,7 @@ static void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width,
 static inline int clip(int value, int min, int max);
 static void sigHandler(int signo);
 static void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height);
-static void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height);
+static void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height, int fb_width);
 int main(int argc, char** argv) 
 {
     signal(SIGINT, sigHandler);
@@ -189,10 +189,10 @@ int main(int argc, char** argv)
 
         fflush(h264_file);  // 데이터를 즉시 파일로 기록
 	// RGB565 데이터를 프레임버퍼로 출력
-	yuv420p_to_rgb565(yuv420p_data, rgbBuffer, WIDTH, HEIGHT);
+	yuv420p_to_rgb565(yuv420p_data, rgbBuffer, WIDTH, HEIGHT, fb_width);
 
 	// 프레임버퍼에 RGB 데이터를 복사
-	memcpy(fbPtr, rgbBuffer, fbSize);
+	memcpy(fbPtr, rgbBuffer, fb_height * fb_width * 2);
 
 	/*
 	 * 아래의 방법을 통해서 해결했는데 왜 그럴까 ?? 이 문제 해결한 방법 찾아보기
@@ -508,7 +508,7 @@ void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int 
 }
 
 // YUV420P 데이터를 RGB565로 변환하는 함수
-void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height) {
+void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height, int fb_width) {
     int y, x, y_stride, uv_stride;
     int r, g, b;
     int y_value, u_value, v_value;
@@ -531,7 +531,7 @@ void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_da
             b = clip((298 * y_value + 516 * u_value + 128) >> 8, 0, 255);
 
             // RGB888 -> RGB565로 변환
-            rgb565_data[y * width + x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+            rgb565_data[y * fb_width + x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
         }
     }
 }
