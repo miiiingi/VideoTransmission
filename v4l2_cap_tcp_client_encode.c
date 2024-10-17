@@ -52,9 +52,8 @@ static void save_framebuffer_as_bmp(const char *filename, unsigned short *fbPtr,
 static void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int height);
 static inline int clip(int value, int min, int max);
 static void sigHandler(int signo);
-static void yuv420p_to_yuyv(AVFrame *frame, unsigned char *yuyv, int width, int height);
 static void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height);
-
+static void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height);
 int main(int argc, char** argv) 
 {
     signal(SIGINT, sigHandler);
@@ -152,6 +151,8 @@ int main(int argc, char** argv)
     yuv420p_data[0] = malloc(WIDTH * HEIGHT);
     yuv420p_data[1] = malloc((WIDTH * HEIGHT) / 4);
     yuv420p_data[2] = malloc((WIDTH * HEIGHT) / 4);
+    int fb_width = vinfo.xres;
+    int fb_height = vinfo.yres;
 
     while (cond) {
         // recv()로 패킷을 수신
@@ -187,15 +188,18 @@ int main(int argc, char** argv)
         printf("V plane pointer: %d\n", sizeof(yuv420p_data[2]));
 
         fflush(h264_file);  // 데이터를 즉시 파일로 기록
-	unsigned char *yuyv_data = (unsigned char *)malloc(WIDTH * HEIGHT * 2);  // YUYV는 픽셀당 2바이트
-										 
+	// RGB565 데이터를 프레임버퍼로 출력
+	yuv420p_to_rgb565(yuv420p_data, rgbBuffer, WIDTH, HEIGHT);
+
+	// 프레임버퍼에 RGB 데이터를 복사
+	memcpy(fbPtr, rgbBuffer, fbSize);
+
 	/*
 	 * 아래의 방법을 통해서 해결했는데 왜 그럴까 ?? 이 문제 해결한 방법 찾아보기
 	 */
 	//unsigned char *yuyv_copy = (unsigned char *)malloc(WIDTH * HEIGHT * 2);
 	//memcpy(yuyv_copy, yuyv_data, WIDTH * HEIGHT * 2);
 	// YUV420P 데이터가 제대로 들어있는지 확인
-	// yuv420p_to_yuyv(frame, yuyv_copy, WIDTH, HEIGHT);
 	// YUV420P → YUYV 변환
 
 	// YUYV 데이터를 BMP 파일로 저장
@@ -203,7 +207,6 @@ int main(int argc, char** argv)
 	// YUYV → RGB565 변환 후 프레임 버퍼로 출력
 	// yuyv2Rgb565(yuyv_copy, fbPtr, WIDTH, HEIGHT);
 
-	free(yuyv_data);  // 변환된 YUYV 데이터 해제
 	// free(yuyv_copy);  // 변환된 YUYV 데이터 해제
 
     }
@@ -439,46 +442,6 @@ static void sigHandler(int signo)
 }
 
 
-// YUV420P 데이터를 YUYV로 변환하는 함수
-void yuv420p_to_yuyv(AVFrame *frame, unsigned char *yuyv, int width, int height) {
-    printf("=================================378===================\n");
-    fflush(stdout);
-    int y, x;
-    unsigned char *y_plane = frame->data[0];
-    unsigned char *u_plane = frame->data[1];
-    unsigned char *v_plane = frame->data[2];
-    int y_stride = frame->linesize[0];
-    int u_stride = frame->linesize[1];
-    int v_stride = frame->linesize[2];
-    printf("y_stride: %d\n", y_stride);
-    printf("u_stride: %d\n", u_stride);
-    printf("v_stride: %d\n", v_stride);
-
-    if (!y_plane || !u_plane || !v_plane) {
-        fprintf(stderr, "Invalid YUV plane pointers\n");
-        return;
-    }
-
-    if (y_stride == 0 || u_stride == 0 || v_stride == 0) {
-        fprintf(stderr, "Invalid YUV stride\n");
-        return;
-    }
-
-    for (y = 0; y < height; y++) {
-        for (x = 0; x < width; x += 2) {
-            int y_index = y * y_stride + x;
-            int u_index = (y / 2) * u_stride + (x / 2);
-            int v_index = (y / 2) * v_stride + (x / 2);
-
-            // YUYV 포맷으로 변환 (Y0 U Y1 V)
-            yuyv[2 * x] = y_plane[y_index];          // Y0
-            yuyv[2 * x + 1] = u_plane[u_index];      // U
-            yuyv[2 * x + 2] = y_plane[y_index + 1];  // Y1
-            yuyv[2 * x + 3] = v_plane[v_index];      // V
-        }
-        yuyv += width * 2;  // YUYV는 한 픽셀당 2바이트
-    }
-}
 
 // YUYV 데이터를 BMP로 저장하는 함수 추가
 void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height) {
@@ -543,3 +506,33 @@ void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int 
 
     fclose(f);
 }
+
+// YUV420P 데이터를 RGB565로 변환하는 함수
+void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height) {
+    int y, x, y_stride, uv_stride;
+    int r, g, b;
+    int y_value, u_value, v_value;
+
+    y_stride = width;
+    uv_stride = width / 2;
+
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            int y_index = y * y_stride + x;
+            int uv_index = (y / 2) * uv_stride + (x / 2);
+
+            y_value = yuv420p_data[0][y_index];
+            u_value = yuv420p_data[1][uv_index] - 128;
+            v_value = yuv420p_data[2][uv_index] - 128;
+
+            // YUV -> RGB 변환 공식
+            r = clip((298 * y_value + 409 * v_value + 128) >> 8, 0, 255);
+            g = clip((298 * y_value - 100 * u_value - 208 * v_value + 128) >> 8, 0, 255);
+            b = clip((298 * y_value + 516 * u_value + 128) >> 8, 0, 255);
+
+            // RGB888 -> RGB565로 변환
+            rgb565_data[y * width + x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        }
+    }
+}
+
