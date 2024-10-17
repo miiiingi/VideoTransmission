@@ -174,19 +174,8 @@ int main(int argc, char** argv)
 
 	pkt->size = bytes_received;
 	pkt->data = packet_data;
-	// YUV420P 데이터가 제대로 들어있는지 확인
-	printf("=======================170===================\n");
-        printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-        printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-        printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
 	// H.264 디코딩 후 YUV420P 프레임을 BMP로 저장
        	decode_fn_check = decode_and_save_frame(dec_ctx, pkt, frame, yuv420p_data, frame_num++);
-
-	printf("=======================179===================\n");
-        printf("Y plane pointer: %d\n", sizeof(yuv420p_data[0]));
-        printf("U plane pointer: %d\n", sizeof(yuv420p_data[1]));
-        printf("V plane pointer: %d\n", sizeof(yuv420p_data[2]));
-
         fflush(h264_file);  // 데이터를 즉시 파일로 기록
 	// RGB565 데이터를 프레임버퍼로 출력
 	yuv420p_to_rgb565(yuv420p_data, rgbBuffer, WIDTH, HEIGHT, fb_width);
@@ -287,8 +276,10 @@ int init_framebuffer(unsigned short **fbPtr, int *size)
         close(fd);
         return -1;
     }
+    /*
     printf("vinfo.yres: %d\n", vinfo.yres);
     printf("vinfo.yres_virtual: %d\n", vinfo.yres_virtual);
+    */
 
     // mmap을 통해 메모리를 매핑하여 물리 메모리와 프레임 버퍼를 연결, 매핑된 메모리 주소가 반환되며, 이주소를 사용해 프레임버퍼에 데이터를 직접 쓸 수 있다.
     *size = vinfo.yres_virtual * vinfo.xres_virtual * vinfo.bits_per_pixel / 8;
@@ -314,56 +305,24 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
 	    return -1;
 	}
 	while(ret >= 0){
-	    /*
-	    if (!dec_ctx) {
-		fprintf(stderr, "Decoder context is NULL\n");
-		return -1;
-	    }
-
-	    if (!avcodec_is_open(dec_ctx)) {
-		fprintf(stderr, "Decoder context is not open\n");
-		return -1;
-	    }
-
-	    // 유효한 너비와 높이가 설정되어 있는지 확인
-	    if (dec_ctx->width == 0 || dec_ctx->height == 0) {
-		fprintf(stderr, "Decoder context has invalid width or height\n");
-		return -1;
-	    }
-	    */
 	    ret = avcodec_receive_frame(dec_ctx, frame);
-	    printf("=======================324===================\n");
-	    printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-	    printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-	    printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
 	    if (ret == AVERROR(EAGAIN)){
-		printf("=======================308===================\n");
-		return -1;
+		return AVERROR(EAGAIN);
 	    } else if(ret == AVERROR_EOF){ 
-		printf("=======================311===================\n");
-		return -1;
+		return AVERROR_EOF;
 	    } else if (ret < 0) {
-		printf("=======================339===================\n");
-		fprintf(stderr, "Error during decoding\n");
+		perror("Error during decoding\n");
 		return -1;
 	    }
 	    memcpy(output_data[0], frame->data[0], Y_SIZE);
 	    memcpy(output_data[1], frame->data[1], UV_SIZE);
 	    memcpy(output_data[2], frame->data[2], UV_SIZE);
 	    /*
+	     * yuv420p 데이터 bmp 파일로 저장하는 코드
 	    char filename[1024];
 	    snprintf(filename, sizeof(filename), "output_frame_%03d.bmp", frame_num);
 	    save_yuv420p_as_bmp(filename, frame, WIDTH, HEIGHT);
 	    */
-
-	    // YUV420P 프레임을 BMP로 저장
-	    /*
-	    printf("Saved %s\n", filename);
-	    */
-	    printf("=======================351===================\n");
-	    printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-	    printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-	    printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
 	}
     }
     return 0;
