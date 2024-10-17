@@ -46,8 +46,7 @@ static int init_framebuffer(unsigned short **fbPtr, int *size);
 /*
  * 디버깅을 위해 프레임 버퍼에 출력된 데이터를 bmp 파일로 저장
  * */
-static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, int frame_num);
-
+static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, uint8_t **output_data, int frame_num);
 static void save_framebuffer_as_bmp(const char *filename, unsigned short *fbPtr, int width, int height);
 
 static void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int height);
@@ -139,7 +138,7 @@ int main(int argc, char** argv)
     int frame_num = 0;
 
     // .h264 파일로 저장할 파일 포인터 열기
-    FILE *h264_file = fopen("received_output3.h264", "wb");
+    FILE *h264_file = fopen("received_output4.h264", "wb");
     if (!h264_file) {
         perror("Failed to open output .h264 file");
         close(sock);
@@ -148,6 +147,12 @@ int main(int argc, char** argv)
 
     uint8_t *packet_data = malloc(BUFFER_SIZE);
     int decode_fn_check = -2;
+    // Y, U, V 평면 복사를 위한 메모리 할당
+    uint8_t *yuv420p_data[3];
+    yuv420p_data[0] = malloc(WIDTH * HEIGHT);
+    yuv420p_data[1] = malloc((WIDTH * HEIGHT) / 4);
+    yuv420p_data[2] = malloc((WIDTH * HEIGHT) / 4);
+
     while (cond) {
         // recv()로 패킷을 수신
         bytes_received = recv(sock, packet_data, WIDTH * HEIGHT * 2, 0);
@@ -174,18 +179,12 @@ int main(int argc, char** argv)
         printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
         printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
 	// H.264 디코딩 후 YUV420P 프레임을 BMP로 저장
-       	decode_fn_check = decode_and_save_frame(dec_ctx, pkt, frame, frame_num++);
-	printf("decode_fn_check: %d\n");
-	/*
-	if (decode_fn_check < 0){
-	    fprintf(stderr, "Decoding error or end of stream\n");
-	    break;
-	}
-	*/
+       	decode_fn_check = decode_and_save_frame(dec_ctx, pkt, frame, yuv420p_data, frame_num++);
+
 	printf("=======================179===================\n");
-        printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-        printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-        printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
+        printf("Y plane pointer: %d\n", sizeof(yuv420p_data[0]));
+        printf("U plane pointer: %d\n", sizeof(yuv420p_data[1]));
+        printf("V plane pointer: %d\n", sizeof(yuv420p_data[2]));
 
         fflush(h264_file);  // 데이터를 즉시 파일로 기록
 	unsigned char *yuyv_data = (unsigned char *)malloc(WIDTH * HEIGHT * 2);  // YUYV는 픽셀당 2바이트
@@ -214,6 +213,9 @@ int main(int argc, char** argv)
     munmap(fbPtr, fbSize);
     free(rgbBuffer);
     free(packet_data);
+    free(yuv420p_data[0]);
+    free(yuv420p_data[1]);
+    free(yuv420p_data[2]);
     av_packet_free(&pkt);
     av_frame_free(&frame);
     avcodec_free_context(&dec_ctx);
@@ -299,16 +301,17 @@ int init_framebuffer(unsigned short **fbPtr, int *size)
 }
 
 // H.264 디코딩 후 프레임을 BMP로 저장하는 함수
-static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, int frame_num) {
-    while(1){
+static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, uint8_t **output_data, int frame_num) {
+    int Y_SIZE = WIDTH * HEIGHT;
+    int UV_SIZE = (WIDTH / 2) * (HEIGHT / 2);
+    while(cond){
 	int ret = avcodec_send_packet(dec_ctx, pkt);
 	if (ret < 0) {
 	    fprintf(stderr, "Error sending a packet for decoding\n");
 	    return -1;
 	}
-	int count = 0;
-
-	while (ret >= 0) {
+	while(ret >= 0){
+	    /*
 	    if (!dec_ctx) {
 		fprintf(stderr, "Decoder context is NULL\n");
 		return -1;
@@ -324,6 +327,7 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
 		fprintf(stderr, "Decoder context has invalid width or height\n");
 		return -1;
 	    }
+	    */
 	    ret = avcodec_receive_frame(dec_ctx, frame);
 	    printf("=======================324===================\n");
 	    printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
@@ -336,14 +340,13 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
 		printf("=======================311===================\n");
 		return -1;
 	    } else if (ret < 0) {
+		printf("=======================339===================\n");
 		fprintf(stderr, "Error during decoding\n");
 		return -1;
 	    }
-	    // 디코딩된 프레임이 올바른지 확인하는 디버깅 코드 추가
-	    if (frame->linesize[0] == 0 || frame->linesize[1] == 0 || frame->linesize[2] == 0) {
-		fprintf(stderr, "Invalid frame received, linesize is 0\n");
-		return -1;
-	    }
+	    memcpy(output_data[0], frame->data[0], Y_SIZE);
+	    memcpy(output_data[1], frame->data[1], UV_SIZE);
+	    memcpy(output_data[2], frame->data[2], UV_SIZE);
 	    /*
 	    char filename[1024];
 	    snprintf(filename, sizeof(filename), "output_frame_%03d.bmp", frame_num);
@@ -359,10 +362,6 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
 	    printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
 	    printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
 	}
-	printf("=======================331===================\n");
-	printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-	printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-	printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
     }
     return 0;
 }
