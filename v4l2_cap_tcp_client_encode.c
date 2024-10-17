@@ -176,10 +176,12 @@ int main(int argc, char** argv)
 	// H.264 디코딩 후 YUV420P 프레임을 BMP로 저장
        	decode_fn_check = decode_and_save_frame(dec_ctx, pkt, frame, frame_num++);
 	printf("decode_fn_check: %d\n");
+	/*
 	if (decode_fn_check < 0){
 	    fprintf(stderr, "Decoding error or end of stream\n");
 	    break;
 	}
+	*/
 	printf("=======================179===================\n");
         printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
         printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
@@ -298,68 +300,70 @@ int init_framebuffer(unsigned short **fbPtr, int *size)
 
 // H.264 디코딩 후 프레임을 BMP로 저장하는 함수
 static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, int frame_num) {
-    int ret = avcodec_send_packet(dec_ctx, pkt);
-    if (ret < 0) {
-        fprintf(stderr, "Error sending a packet for decoding\n");
-        return ret;
+    while(1){
+	int ret = avcodec_send_packet(dec_ctx, pkt);
+	if (ret < 0) {
+	    fprintf(stderr, "Error sending a packet for decoding\n");
+	    return -1;
+	}
+	int count = 0;
+
+	while (ret >= 0) {
+	    if (!dec_ctx) {
+		fprintf(stderr, "Decoder context is NULL\n");
+		return -1;
+	    }
+
+	    if (!avcodec_is_open(dec_ctx)) {
+		fprintf(stderr, "Decoder context is not open\n");
+		return -1;
+	    }
+
+	    // 유효한 너비와 높이가 설정되어 있는지 확인
+	    if (dec_ctx->width == 0 || dec_ctx->height == 0) {
+		fprintf(stderr, "Decoder context has invalid width or height\n");
+		return -1;
+	    }
+	    ret = avcodec_receive_frame(dec_ctx, frame);
+	    printf("=======================324===================\n");
+	    printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
+	    printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
+	    printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
+	    if (ret == AVERROR(EAGAIN)){
+		printf("=======================308===================\n");
+		return -1;
+	    } else if(ret == AVERROR_EOF){ 
+		printf("=======================311===================\n");
+		return -1;
+	    } else if (ret < 0) {
+		fprintf(stderr, "Error during decoding\n");
+		return -1;
+	    }
+	    // 디코딩된 프레임이 올바른지 확인하는 디버깅 코드 추가
+	    if (frame->linesize[0] == 0 || frame->linesize[1] == 0 || frame->linesize[2] == 0) {
+		fprintf(stderr, "Invalid frame received, linesize is 0\n");
+		return -1;
+	    }
+	    /*
+	    char filename[1024];
+	    snprintf(filename, sizeof(filename), "output_frame_%03d.bmp", frame_num);
+	    save_yuv420p_as_bmp(filename, frame, WIDTH, HEIGHT);
+	    */
+
+	    // YUV420P 프레임을 BMP로 저장
+	    /*
+	    printf("Saved %s\n", filename);
+	    */
+	    printf("=======================351===================\n");
+	    printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
+	    printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
+	    printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
+	}
+	printf("=======================331===================\n");
+	printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
+	printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
+	printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
     }
-    int count = 0;
-
-    while (ret >= 0) {
-	if (!dec_ctx) {
-	    fprintf(stderr, "Decoder context is NULL\n");
-	    return -1;
-	}
-
-	if (!avcodec_is_open(dec_ctx)) {
-	    fprintf(stderr, "Decoder context is not open\n");
-	    return -1;
-	}
-
-	// 유효한 너비와 높이가 설정되어 있는지 확인
-	if (dec_ctx->width == 0 || dec_ctx->height == 0) {
-	    fprintf(stderr, "Decoder context has invalid width or height\n");
-	    return -1;
-	}
-        ret = avcodec_receive_frame(dec_ctx, frame);
-	printf("=======================324===================\n");
-        printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-        printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-        printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
-        if (ret == AVERROR(EAGAIN)){
-	    printf("=======================308===================\n");
-            return 0;
-        } else if(ret == AVERROR_EOF){ 
-	    printf("=======================311===================\n");
-            return 0;
-	} else if (ret < 0) {
-            fprintf(stderr, "Error during decoding\n");
-            return ret;
-        }
-	// 디코딩된 프레임이 올바른지 확인하는 디버깅 코드 추가
-        if (frame->linesize[0] == 0 || frame->linesize[1] == 0 || frame->linesize[2] == 0) {
-            fprintf(stderr, "Invalid frame received, linesize is 0\n");
-            return -1;
-        }
-	/*
-        char filename[1024];
-        snprintf(filename, sizeof(filename), "output_frame_%03d.bmp", frame_num);
-        save_yuv420p_as_bmp(filename, frame, WIDTH, HEIGHT);
-	*/
-
-        // YUV420P 프레임을 BMP로 저장
-	/*
-        printf("Saved %s\n", filename);
-	*/
-	printf("=======================351===================\n");
-        printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-        printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-        printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
-    }
-    printf("=======================331===================\n");
-    printf("Y plane pointer: %p, size: %d\n", frame->data[0], frame->linesize[0]);
-    printf("U plane pointer: %p, size: %d\n", frame->data[1], frame->linesize[1]);
-    printf("V plane pointer: %p, size: %d\n", frame->data[2], frame->linesize[2]);
     return 0;
 }
 
