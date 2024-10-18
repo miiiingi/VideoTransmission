@@ -291,8 +291,8 @@ void* client_handler(void* arg) {
     enc_ctx->bit_rate = 4000000;  // 비트레이트 설정
     enc_ctx->width = WIDTH;
     enc_ctx->height = HEIGHT;
-    enc_ctx->time_base = (AVRational){1, 30};  // 25 fps
-    enc_ctx->framerate = (AVRational){30, 1};
+    enc_ctx->time_base = (AVRational){1, 40};  // 25 fps
+    enc_ctx->framerate = (AVRational){40, 1};
     enc_ctx->gop_size = 8;  // GOP 크기 설정 (10 프레임마다 키프레임)
     enc_ctx->max_b_frames = 0;
     enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
@@ -321,6 +321,9 @@ void* client_handler(void* arg) {
         perror("Failed to open output file");
         return NULL;
     }
+    int64_t pts = 0;
+    int frame_index = 0;
+    AVRational time_base = enc_ctx->time_base;
 
     while (cond) {
 	/*
@@ -333,6 +336,8 @@ void* client_handler(void* arg) {
 	    /*
 	     * 위에서 정한 인코딩 컨텍스트를 이용해서 pFrameOut에 담긴 yuv420p 데이터를 h.264로 인코딩한다. 
 	     */
+	    pFrameOut->pts = pts;
+	    pts += av_rescale_q(1, (AVRational){1, 40}, time_base);
 	    if(avcodec_send_frame(enc_ctx, pFrameOut) < 0){
 		perror("Error Sending Frame To Encoder\n");
 		break;
@@ -519,7 +524,8 @@ void save_to_h264(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt, FILE *o
     while (avcodec_receive_packet(enc_ctx, pkt) == 0) {
         // 클라이언트로 인코딩된 패킷 전송
         int sent_bytes = send(client_fd, pkt->data, pkt->size, 0);
-        printf("Sent H.264 data: %d bytes\n", sent_bytes);
+        printf("\rSent H.264 data: %zd bytes", sent_bytes);
+	fflush(stdout);
 
         // 인코딩된 패킷을 H.264 파일로 저장
         fwrite(pkt->data, 1, pkt->size, outfile);
