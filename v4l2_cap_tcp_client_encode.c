@@ -139,7 +139,7 @@ int main(int argc, char** argv)
     int frame_num = 0;
 
     // .h264 파일로 저장할 파일 포인터 열기
-    FILE *h264_file = fopen("received_output4.h264", "wb");
+    FILE *h264_file = fopen("client_received.h264", "wb");
     if (!h264_file) {
         perror("Failed to open output .h264 file");
         close(sock);
@@ -502,40 +502,6 @@ void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_da
 
             // RGB888 -> RGB565로 변환
             rgb565_data[(start_y + y) * fb_width + (start_x + x)] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-        }
-    }
-}
-static const uint8_t font8x8_basic[128][8] = {
-    // ASCII 32~127의 비트맵 폰트를 정의합니다 (간단히 생략)
-    // '0'~'9', 'A'~'Z' 등 필요에 따라 추가적으로 정의합니다
-    // 예시:
-    [48] = { 0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C },  // '0'
-    [49] = { 0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C },  // '1'
-    // ...
-};
-
-// 특정 좌표에 텍스트를 출력하는 함수
-void draw_text_on_framebuffer(const char* text, int x, int y, unsigned short *fbPtr, int fb_width, int fb_height) {
-    for (int i = 0; text[i] != '\0'; i++) {
-        draw_char_on_framebuffer(text[i], x + i * 8, y, fbPtr, fb_width, fb_height);  // 글자를 그립니다.
-    }
-}
-
-// 단일 글자를 그리는 함수
-void draw_char_on_framebuffer(char c, int x, int y, unsigned short *fbPtr, int fb_width, int fb_height) {
-    if (c < 32 || c > 127) return;  // 유효하지 않은 문자는 무시합니다.
-    
-    const uint8_t* bitmap = font8x8_basic[(int)c];
-
-    for (int row = 0; row < 8; row++) {
-        for (int col = 0; col < 8; col++) {
-            if (bitmap[row] & (1 << (7 - col))) {
-                int pixel_x = x + col;
-                int pixel_y = y + row;
-                if (pixel_x < fb_width && pixel_y < fb_height) {
-                    fbPtr[pixel_y * fb_width + pixel_x] = 0xFFFF;  // 흰색으로 픽셀을 설정 (RGB565 기준)
-                }
-            }
         }
     }
 }
