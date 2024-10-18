@@ -296,6 +296,7 @@ void* client_handler(void* arg) {
     enc_ctx->gop_size = 4;  // GOP 크기 설정 (10 프레임마다 키프레임)
     enc_ctx->max_b_frames = 0;
     enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    enc_ctx->flags |= AV_CODEC_FLAG_CLOSED_GOP;
     
     /*
      * 위에서 정한 코덱과 인코딩 컨텍스트를 연다.

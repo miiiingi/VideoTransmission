@@ -102,6 +102,8 @@ int main(int argc, char** argv)
         fprintf(stderr, "Could not allocate video codec context\n");
         return -1;
     }
+    dec_ctx->time_base = (AVRational){1, 120};
+    dec_ctx->framerate = (AVRational){120, 1};
 
     if (avcodec_open2(dec_ctx, codec, NULL) < 0) {
         fprintf(stderr, "Could not open codec\n");
@@ -179,10 +181,10 @@ int main(int argc, char** argv)
         // NAL 유닛인지 확인하고 기록
         if (packet_data[0] == 0x00 && packet_data[1] == 0x00 && packet_data[2] == 0x00 && packet_data[3] == 0x01) {
             fwrite(packet_data, 1, bytes_received, h264_file);
+	    pkt->size = bytes_received;
+	    pkt->data = packet_data;
         }
 
-	pkt->size = bytes_received;
-	pkt->data = packet_data;
 	// H.264 디코딩 후 YUV420P 프레임을 BMP로 저장
        	decode_fn_check = decode_and_save_frame(dec_ctx, pkt, frame, yuv420p_data, frame_num++);
         fflush(h264_file);  // 데이터를 즉시 파일로 기록
@@ -322,6 +324,10 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
 	    } else if (ret < 0) {
 		perror("Error during decoding\n");
 		return -1;
+	    }
+	    // PTS가 유효한지 확인 후 조정
+	    if (frame->pts != AV_NOPTS_VALUE) {
+		frame->pts = av_rescale_q(frame->pts, dec_ctx->time_base, (AVRational){1, 120});
 	    }
 	    memcpy(output_data[0], frame->data[0], Y_SIZE);
 	    memcpy(output_data[1], frame->data[1], UV_SIZE);
