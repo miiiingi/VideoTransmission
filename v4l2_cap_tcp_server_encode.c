@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <linux/fb.h>
 #include <linux/videodev2.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
@@ -25,11 +26,14 @@
 #define HEIGHT 		    480  
 #define BUFFER_COUNT	4  	// 버퍼의 개수
 #define VIDEO_DEV     "/dev/video0"
+#define FB_DEV "/dev/fb0"
 #define SERVER_PORT 8080
 #define SERVER_IP "127.0.0.1"
 
-int buffer_size = WIDTH * HEIGHT * 2;
+
+int fbSize, buffer_size = WIDTH * HEIGHT * 2;
 typedef unsigned char uchar;
+unsigned short *rgbBuffer, *fbPtr;
 
 struct buffer {
     void   *start;
@@ -37,6 +41,7 @@ struct buffer {
 };
 struct buffer buffers[BUFFER_COUNT];
 struct v4l2_buffer buf;                     // V4L2에서 사용할 메모리 버퍼
+static struct fb_var_screeninfo vinfo;
 static int cond = 1;
 /*
  * 프레임 버퍼에 대한 다양한 화면 속성 정보를 담고있다.
@@ -50,13 +55,17 @@ static void* client_handler(void* arg);
 static void* server_handler(void* arg);
 static int server_setup();
 static int convert_yuyv422_to_yuv420p(uint8_t *input_data, uint8_t **output_data, int width, int height, struct SwsContext *sws_ctx, AVFrame *pFrameIn, AVFrame *pFrameOut);
-void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width, int height);
+static void save_yuv420p_as_bmp(const char *filename, AVFrame *yuv420p_frame, int width, int height);
 // H.264 인코딩을 위한 함수 선언
-void save_to_h264(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt, FILE *outfile);
-
+static void save_to_h264(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt, FILE *outfile);
+static int convert_yuyv422_to_yuv420p(uint8_t *input_data, uint8_t **output_data, int width, int height, struct SwsContext *sws_ctx, AVFrame *pFrameIn, AVFrame *pFrameOut);
+static void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height, int fb_width);
+static int init_framebuffer(unsigned short **fbPtr, int *size);
+static inline int clip(int value, int min, int max);
 int main(int argc, char** argv) 
+
 {
-    int cam_fd;
+    int cam_fd, fb_fd;
     signal(SIGINT, sigHandler);
 
     // V4L2 초기화
@@ -76,6 +85,19 @@ int main(int argc, char** argv)
 
     int addrlen = sizeof(struct sockaddr_in);
     struct sockaddr_in client_addr;
+    fb_fd = init_framebuffer(&fbPtr, &fbSize);
+    if(fb_fd < 0){
+	perror("Failed to Initialize framebuffer\n");
+	return -1;
+    }
+
+    rgbBuffer = (unsigned short *)malloc(fbSize);
+    if(!rgbBuffer){
+	perror("Failed to allocate buffers");
+	close(fb_fd);
+	return -1;
+    }
+
 
     // V4L2를 이용한 영상의 캡쳐 및 표시
     while (cond) {
@@ -268,7 +290,8 @@ void* client_handler(void* arg) {
     yuv420p_data[0] = malloc(WIDTH * HEIGHT);                  // Y plane
     yuv420p_data[1] = malloc((WIDTH / 2) * (HEIGHT / 2));      // U plane
     yuv420p_data[2] = malloc((WIDTH / 2) * (HEIGHT / 2));      // V plane
-							       //
+    int fb_width = vinfo.xres;
+    int fb_height = vinfo.yres;
     /*
      * yuv420p에서 h.264로 변환하기 위한 코덱 정의
      */
@@ -342,6 +365,9 @@ void* client_handler(void* arg) {
 	     */
 	    // save_yuv420p_as_bmp(bmp_filename, pFrameOut, WIDTH, HEIGHT);
 	    save_to_h264(client_fd, enc_ctx, pkt, outfile);
+	    yuv420p_to_rgb565(yuv420p_data, rgbBuffer, WIDTH, HEIGHT, fb_width);
+	    memcpy(fbPtr, rgbBuffer, fb_height * fb_width * 2);
+
         }
     }
 
@@ -514,7 +540,6 @@ int server_setup()
 
     return server_fd;
 }
-
 void save_to_h264(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt, FILE *outfile) {
     while (avcodec_receive_packet(enc_ctx, pkt) == 0) {
         // 클라이언트로 인코딩된 패킷 전송
@@ -527,3 +552,78 @@ void save_to_h264(int client_fd, AVCodecContext *enc_ctx, AVPacket *pkt, FILE *o
         av_packet_unref(pkt);  // 패킷 해제
     }
 }
+
+// 프레임버퍼를 설정하는 함수
+int init_framebuffer(unsigned short **fbPtr, int *size) 
+{
+    //frame buffer 장치 열기
+    int fd = open(FB_DEV, O_RDWR);
+    if (fd < 0) {
+        perror("Failed to open framebuffer device");
+        return -1;
+    }
+
+    // ioctl은 디바이스와 소통하기 위한 시스템 호출로 하드웨어 장치의 설정과 상태를 제어할 때 사용.
+    // 파일디스크립터를 통해 장치에 명령을 전달하고 특정 명령에 대한 처리를 요청
+    // 아래의 함수는 프레임버퍼 장치에 FBIOGET_VSCREENINFO 명령을 보내 화면 정보를 가져오라는 요청을 하는 것
+    // 성공적으로 호출되면 프레임버퍼의 화면 설정 정보가 vinfo라는 fb_var_screeninfo 구조체에 저장됨
+    if (ioctl(fd, FBIOGET_VSCREENINFO, &vinfo)) {
+        perror("Error reading variable information");
+        close(fd);
+        return -1;
+    }
+    /*
+    printf("vinfo.yres: %d\n", vinfo.yres);
+    printf("vinfo.yres_virtual: %d\n", vinfo.yres_virtual);
+    */
+
+    // mmap을 통해 메모리를 매핑하여 물리 메모리와 프레임 버퍼를 연결, 매핑된 메모리 주소가 반환되며, 이주소를 사용해 프레임버퍼에 데이터를 직접 쓸 수 있다.
+    *size = vinfo.yres_virtual * vinfo.xres_virtual * vinfo.bits_per_pixel / 8;
+
+    *fbPtr = (unsigned short *)mmap(0, *size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (*fbPtr == MAP_FAILED) {
+        perror("Failed to mmap framebuffer");
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+// YUV420P 데이터를 RGB565로 변환하는 함수
+void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height, int fb_width) {
+    int y, x, y_stride, uv_stride;
+    int r, g, b;
+    int y_value, u_value, v_value;
+
+    y_stride = width;
+    uv_stride = width / 2;
+    int start_x = 400;
+    int start_y = 250;
+
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            int y_index = y * y_stride + x;
+            int uv_index = (y / 2) * uv_stride + (x / 2);
+
+            y_value = yuv420p_data[0][y_index];
+            u_value = yuv420p_data[1][uv_index] - 128;
+            v_value = yuv420p_data[2][uv_index] - 128;
+
+            // YUV -> RGB 변환 공식
+            r = clip((298 * y_value + 409 * v_value + 128) >> 8, 0, 255);
+            g = clip((298 * y_value - 100 * u_value - 208 * v_value + 128) >> 8, 0, 255);
+            b = clip((298 * y_value + 516 * u_value + 128) >> 8, 0, 255);
+
+            // RGB888 -> RGB565로 변환
+            rgb565_data[(start_y + y) * fb_width + (start_x + x)] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        }
+    }
+}
+
+static inline int clip(int value, int min, int max)
+{
+    return (value > max ? max : (value < min ? min : value));
+}
+
+
