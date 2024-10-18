@@ -291,9 +291,9 @@ void* client_handler(void* arg) {
     enc_ctx->bit_rate = 4000000;  // 비트레이트 설정
     enc_ctx->width = WIDTH;
     enc_ctx->height = HEIGHT;
-    enc_ctx->time_base = (AVRational){1, 40};  // 25 fps
-    enc_ctx->framerate = (AVRational){40, 1};
-    enc_ctx->gop_size = 8;  // GOP 크기 설정 (10 프레임마다 키프레임)
+    enc_ctx->time_base = (AVRational){1, 120};  // 25 fps
+    enc_ctx->framerate = (AVRational){120, 1};
+    enc_ctx->gop_size = 4;  // GOP 크기 설정 (10 프레임마다 키프레임)
     enc_ctx->max_b_frames = 0;
     enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
     
@@ -314,7 +314,7 @@ void* client_handler(void* arg) {
     }
     
     // H.264 파일을 저장할 파일 포인터
-    FILE *outfile = fopen("outputtest.h264", "wb");
+    FILE *outfile = fopen("server_send.h264", "wb");
     // BMP로 저장할 파일명 지정
     const char *bmp_filename = "output_frame.bmp";
     if (!outfile) {
