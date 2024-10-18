@@ -15,8 +15,8 @@
 #include <libswscale/swscale.h>
 #include <linux/videodev2.h>
 
-#define WIDTH 		    800
-#define HEIGHT 		    600  
+#define WIDTH 		    640
+#define HEIGHT 		    480
 
 #define VIDEO_DEV     "/dev/video0"
 #define FB_DEV        "/dev/fb0"
@@ -54,6 +54,8 @@ static inline int clip(int value, int min, int max);
 static void sigHandler(int signo);
 static void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height);
 static void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_data, int width, int height, int fb_width);
+static void draw_char_on_framebuffer(char c, int x, int y, unsigned short *fbPtr, int fb_width, int fb_height);
+static void draw_text_on_framebuffer(const char* text, int x, int y, unsigned short *fbPtr, int fb_width, int fb_height);
 int main(int argc, char** argv) 
 {
     signal(SIGINT, sigHandler);
@@ -165,7 +167,14 @@ int main(int argc, char** argv)
             break;
         }
 
-        printf("Received %zd bytes from server\n", bytes_received);
+	/*
+	char text_buffer[50];
+	snprintf(text_buffer, sizeof(text_buffer), "\rReceived %zd bytes", bytes_received);
+	// 프레임 버퍼 하단에 텍스트 출력 (예: 화면의 마지막 16줄 아래쪽에 출력)
+	draw_text_on_framebuffer(text_buffer, 10, fb_height - 16, fbPtr, fb_width, fb_height);
+	*/
+	printf("\rReceived %zd bytes", bytes_received);
+	fflush(stdout);
 
         // NAL 유닛인지 확인하고 기록
         if (packet_data[0] == 0x00 && packet_data[1] == 0x00 && packet_data[2] == 0x00 && packet_data[3] == 0x01) {
@@ -474,6 +483,8 @@ void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_da
 
     y_stride = width;
     uv_stride = width / 2;
+    int start_x = 400;
+    int start_y = 250;
 
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++) {
@@ -490,8 +501,41 @@ void yuv420p_to_rgb565(unsigned char *yuv420p_data[3], unsigned short *rgb565_da
             b = clip((298 * y_value + 516 * u_value + 128) >> 8, 0, 255);
 
             // RGB888 -> RGB565로 변환
-            rgb565_data[y * fb_width + x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+            rgb565_data[(start_y + y) * fb_width + (start_x + x)] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
         }
     }
 }
+static const uint8_t font8x8_basic[128][8] = {
+    // ASCII 32~127의 비트맵 폰트를 정의합니다 (간단히 생략)
+    // '0'~'9', 'A'~'Z' 등 필요에 따라 추가적으로 정의합니다
+    // 예시:
+    [48] = { 0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C },  // '0'
+    [49] = { 0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C },  // '1'
+    // ...
+};
 
+// 특정 좌표에 텍스트를 출력하는 함수
+void draw_text_on_framebuffer(const char* text, int x, int y, unsigned short *fbPtr, int fb_width, int fb_height) {
+    for (int i = 0; text[i] != '\0'; i++) {
+        draw_char_on_framebuffer(text[i], x + i * 8, y, fbPtr, fb_width, fb_height);  // 글자를 그립니다.
+    }
+}
+
+// 단일 글자를 그리는 함수
+void draw_char_on_framebuffer(char c, int x, int y, unsigned short *fbPtr, int fb_width, int fb_height) {
+    if (c < 32 || c > 127) return;  // 유효하지 않은 문자는 무시합니다.
+    
+    const uint8_t* bitmap = font8x8_basic[(int)c];
+
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+            if (bitmap[row] & (1 << (7 - col))) {
+                int pixel_x = x + col;
+                int pixel_y = y + row;
+                if (pixel_x < fb_width && pixel_y < fb_height) {
+                    fbPtr[pixel_y * fb_width + pixel_x] = 0xFFFF;  // 흰색으로 픽셀을 설정 (RGB565 기준)
+                }
+            }
+        }
+    }
+}

@@ -21,8 +21,8 @@
 #include <libavutil/avutil.h>      // 기본 유틸리티 함수
 
 
-#define WIDTH 		    800
-#define HEIGHT 		    600  
+#define WIDTH 		    640
+#define HEIGHT 		    480  
 #define BUFFER_COUNT	4  	// 버퍼의 개수
 #define VIDEO_DEV     "/dev/video0"
 #define SERVER_PORT 8080
@@ -257,7 +257,7 @@ void* client_handler(void* arg) {
     /*
      * yuyv 데이터를 yuv420p로 변환하는 context를 선언해줌
      */
-    struct SwsContext *sws_ctx = sws_getContext(WIDTH, HEIGHT, AV_PIX_FMT_YUYV422, WIDTH, HEIGHT, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
+    struct SwsContext *sws_ctx = sws_getContext(WIDTH, HEIGHT, AV_PIX_FMT_YUYV422, WIDTH, HEIGHT, AV_PIX_FMT_YUV420P, SWS_LANCZOS, NULL, NULL, NULL);
     if(!sws_ctx){
 	av_frame_free(&pFrameIn);
 	av_frame_free(&pFrameOut);
@@ -288,13 +288,13 @@ void* client_handler(void* arg) {
         return NULL;
     }
     
-    enc_ctx->bit_rate = 400000;  // 비트레이트 설정
+    enc_ctx->bit_rate = 4000000;  // 비트레이트 설정
     enc_ctx->width = WIDTH;
     enc_ctx->height = HEIGHT;
-    enc_ctx->time_base = (AVRational){1, 25};  // 25 fps
-    enc_ctx->framerate = (AVRational){25, 1};
-    enc_ctx->gop_size = 10;  // GOP 크기 설정 (10 프레임마다 키프레임)
-    enc_ctx->max_b_frames = 1;
+    enc_ctx->time_base = (AVRational){1, 30};  // 25 fps
+    enc_ctx->framerate = (AVRational){30, 1};
+    enc_ctx->gop_size = 8;  // GOP 크기 설정 (10 프레임마다 키프레임)
+    enc_ctx->max_b_frames = 0;
     enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
     
     /*
@@ -314,7 +314,9 @@ void* client_handler(void* arg) {
     }
     
     // H.264 파일을 저장할 파일 포인터
-    FILE *outfile = fopen("output.h264", "wb");
+    FILE *outfile = fopen("outputtest.h264", "wb");
+    // BMP로 저장할 파일명 지정
+    const char *bmp_filename = "output_frame.bmp";
     if (!outfile) {
         perror("Failed to open output file");
         return NULL;
@@ -338,6 +340,7 @@ void* client_handler(void* arg) {
 	    /*
 	     * 클라이언트에게 h.264로 인코딩된 패킷을 전송한다.
 	     */
+	    // save_yuv420p_as_bmp(bmp_filename, pFrameOut, WIDTH, HEIGHT);
 	    save_to_h264(client_fd, enc_ctx, pkt, outfile);
         }
     }
