@@ -10,6 +10,7 @@
 #include <linux/fb.h>
 #include <linux/videodev2.h>
 #include <time.h>
+#include "preproc.cu"
 
 #define WIDTH 		    1920
 #define HEIGHT 		    1080 
@@ -18,6 +19,11 @@
 #define FB_DEV        "/dev/fb0"
 
 typedef unsigned char uchar;
+
+// v4l2_cap.c
+extern int init_cuda(int width, int height);
+extern void cleanup_cuda(void);
+extern int process_frame_cuda(const unsigned char *yuyv, unsigned char *rgba, int width, int height);
 
 struct buffer {
     void   *start;
@@ -40,54 +46,132 @@ static inline int clip(int value, int min, int max)
     return (value > max ? max : (value < min ? min : value));
 }
 
-void yuv2rgb(uchar y, uchar u, uchar v, int *r, int *g, int *b) {
+// CUDA 초기화 함수
+#include <cuda_runtime.h>
+#include <stdio.h>
+
+// CUDA 디바이스 메모리 포인터들
+static unsigned char *d_yuyv = NULL;    // 디바이스 YUYV 버퍼
+static unsigned char *d_rgba = NULL;    // 디바이스 RGBA 버퍼
+
+// YUV를 RGB로 변환하는 디바이스 함수
+__device__ void yuv2rgb_device(unsigned char y, unsigned char u, unsigned char v, int *r, int *g, int *b) {
     int c = y - 16;
     int d = u - 128;
     int e = v - 128;
 
-    // YUV를 RGB로 변환
     *r = (298 * c + 409 * e + 128) >> 8;
     *g = (298 * c - 100 * d - 208 * e + 128) >> 8;
     *b = (298 * c + 516 * d + 128) >> 8;
 
-    // 값 클리핑
+    // 클리핑
     *r = (*r < 0) ? 0 : (*r > 255) ? 255 : *r;
     *g = (*g < 0) ? 0 : (*g > 255) ? 255 : *g;
     *b = (*b < 0) ? 0 : (*b > 255) ? 255 : *b;
 
-    // R과 B를 교환
+    // R과 B 교환
     int temp = *r;
     *r = *b;
     *b = temp;
 }
 
-// YUYV422를 RGBA로 변환하는 함수
-void yuyv2Rgba(uchar *yuyv, uchar *rgba, int width, int height) {
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x += 2) {
-            // YUYV422는 2픽셀당 4바이트 (Y0, U, Y1, V)
-            uchar y0 = yuyv[y * width * 2 + x * 2];
-            uchar u  = yuyv[y * width * 2 + x * 2 + 1];
-            uchar y1 = yuyv[y * width * 2 + x * 2 + 2];
-            uchar v  = yuyv[y * width * 2 + x * 2 + 3];
+// YUYV를 RGBA로 변환하는 CUDA 커널
+__global__ void yuyv2rgba_kernel(const unsigned char *yuyv, unsigned char *rgba, int width, int height) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-            // YUV를 RGB로 변환
-            int r0, g0, b0, r1, g1, b1;
-            yuv2rgb(y0, u, v, &r0, &g0, &b0);
-            yuv2rgb(y1, u, v, &r1, &g1, &b1);
+    if (x >= width || y >= height)
+        return;
 
-            // RGBA로 변환 (Alpha는 255로 설정)
-            rgba[y * width * 4 + x * 4] = r0;
-            rgba[y * width * 4 + x * 4 + 1] = g0;
-            rgba[y * width * 4 + x * 4 + 2] = b0;
-            rgba[y * width * 4 + x * 4 + 3] = 255; // Alpha
+    // 2픽셀씩 처리 (YUYV 포맷 특성상)
+    x *= 2;
+    if (x < width - 1) {
+        unsigned char y0 = yuyv[y * width * 2 + x * 2];
+        unsigned char u  = yuyv[y * width * 2 + x * 2 + 1];
+        unsigned char y1 = yuyv[y * width * 2 + x * 2 + 2];
+        unsigned char v  = yuyv[y * width * 2 + x * 2 + 3];
 
-            rgba[y * width * 4 + (x + 1) * 4] = r1;
-            rgba[y * width * 4 + (x + 1) * 4 + 1] = g1;
-            rgba[y * width * 4 + (x + 1) * 4 + 2] = b1;
-            rgba[y * width * 4 + (x + 1) * 4 + 3] = 255; // Alpha
-        }
+        int r0, g0, b0, r1, g1, b1;
+        yuv2rgb_device(y0, u, v, &r0, &g0, &b0);
+        yuv2rgb_device(y1, u, v, &r1, &g1, &b1);
+
+        // 첫 번째 픽셀
+        rgba[y * width * 4 + x * 4]     = r0;
+        rgba[y * width * 4 + x * 4 + 1] = g0;
+        rgba[y * width * 4 + x * 4 + 2] = b0;
+        rgba[y * width * 4 + x * 4 + 3] = 255;
+
+        // 두 번째 픽셀
+        rgba[y * width * 4 + (x + 1) * 4]     = r1;
+        rgba[y * width * 4 + (x + 1) * 4 + 1] = g1;
+        rgba[y * width * 4 + (x + 1) * 4 + 2] = b1;
+        rgba[y * width * 4 + (x + 1) * 4 + 3] = 255;
     }
+}
+
+// CUDA 초기화 함수
+int init_cuda(int width, int height) {
+    cudaError_t err;
+
+    // GPU 메모리 할당
+    err = cudaMalloc(&d_yuyv, width * height * 2);  // YUYV 버퍼
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate d_yuyv: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    err = cudaMalloc(&d_rgba, width * height * 4);  // RGBA 버퍼
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate d_rgba: %s\n", cudaGetErrorString(err));
+        cudaFree(d_yuyv);
+        return -1;
+    }
+
+    return 0;
+}
+
+// CUDA 정리 함수
+void cleanup_cuda(void) {
+    if (d_yuyv) cudaFree(d_yuyv);
+    if (d_rgba) cudaFree(d_rgba);
+    d_yuyv = NULL;
+    d_rgba = NULL;
+}
+
+// CUDA 처리 함수
+int process_frame_cuda(const unsigned char *yuyv, unsigned char *rgba, int width, int height) {
+    cudaError_t err;
+
+    // 입력 데이터를 GPU로 복사
+    err = cudaMemcpy(d_yuyv, yuyv, width * height * 2, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to copy yuyv to device: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    // 커널 실행 설정
+    dim3 block_size(16, 16);
+    dim3 grid_size((width / 2 + block_size.x - 1) / block_size.x,
+                   (height + block_size.y - 1) / block_size.y);
+
+    // 커널 실행
+    yuyv2rgba_kernel<<<grid_size, block_size>>>(d_yuyv, d_rgba, width, height);
+
+    // 커널 실행 오류 체크
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    // 결과를 CPU로 복사
+    err = cudaMemcpy(rgba, d_rgba, width * height * 4, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to copy rgba to host: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    return 0;
 }
 
 // 프레임버퍼를 설정하는 함수
@@ -222,7 +306,7 @@ static int init_v4l2(int *fd, struct buffer *buffers)
 
 int main(int argc, char** argv) 
 {
-    unsigned short *rgbBuffer, *fbPtr;
+    unsigned char *rgbBuffer, *fbPtr;
     int cam_fd, fb_fd;
     int fbSize, buffer_size = WIDTH * HEIGHT * 2; // YUYV는 픽셀당 2바이트 
     struct buffer buffers[BUFFER_COUNT];
@@ -244,11 +328,16 @@ int main(int argc, char** argv)
     }
 
     // 영상을 저장할 메모리 할당
-    // framebuffer는 rgb 16 비트라서 unsigned short로 변환
     rgbBuffer = (unsigned short *)malloc(fbSize);
     if (!rgbBuffer) {
         perror("Failed to allocate buffers");
         close(fb_fd);
+        return -1;
+    }
+
+    // CUDA 초기화 추가
+    if (init_cuda(WIDTH, HEIGHT) < 0) {
+        fprintf(stderr, "CUDA initialization failed\n");
         return -1;
     }
 
@@ -263,6 +352,7 @@ int main(int argc, char** argv)
     printf("vinfo.yres: %d\n", vinfo.yres);
     printf("width: %d\n", WIDTH);
     printf("height %d\n", HEIGHT);
+
 
     // V4L2를 이용한 영상의 캡쳐 및 표시
     while (cond) {
@@ -280,7 +370,10 @@ int main(int argc, char** argv)
         }
         
         // init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다. 
-        yuyv2Rgba(buffers[buf.index].start, rgbBuffer, WIDTH, HEIGHT);
+        if (process_frame_cuda(buffers[buf.index].start, rgbBuffer, WIDTH, HEIGHT) < 0) {
+            fprintf(stderr, "CUDA processing failed\n");
+            break;
+        }
 
         frame_count++;
         clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -306,6 +399,8 @@ int main(int argc, char** argv)
     }
 
     printf("\nGood Bye!!!\n");
+
+    cleanup_cuda();
 
     // 캡쳐 종료
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
