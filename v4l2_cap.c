@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <linux/fb.h>
 #include <linux/videodev2.h>
+#include <time.h>
 
 #define WIDTH 		    1920
 #define HEIGHT 		    1080 
@@ -39,46 +40,53 @@ static inline int clip(int value, int min, int max)
     return (value > max ? max : (value < min ? min : value));
 }
 
-// YUYV 데이터를 RGB565로 변환하는 함수
-void yuyv2Rgb565(uchar *yuyv, unsigned short *rgb, int width, int height) 
-{
-    uchar* in = (uchar*)yuyv;
-    unsigned short pixel;
-    int istride = width*2;     /* 이미지의 폭을 넘어가면 다음 라인으로 내려가도록 설정 */
-    int x, y, j;
-    int y0, u, y1, v, r, g, b;
-    long loc = 0;
-    printf("vinfo.xres: %d\n", vinfo.xres);
-    printf("vinfo.yres: %d\n", vinfo.yres);
-    printf("width: %d\n", width);
-    printf("height %d\n", height);
-    for (y = 0; y < height; ++y) {
-        for (j = 0, x = 0; j < vinfo.xres * 2; j += 4, x += 2) {
-            if (j >= width*2) {                 /* 현재의 화면에서 이미지를 넘어서는 빈 공간을 처리 */
-                 loc++; loc++;
-                 continue;
-            }
-            /* YUYV 성분을 분리 */
-            y0 = in[j];
-            u = in[j + 1] - 128;
-            y1 = in[j + 2];
-            v = in[j + 3] - 128;
+void yuv2rgb(uchar y, uchar u, uchar v, int *r, int *g, int *b) {
+    int c = y - 16;
+    int d = u - 128;
+    int e = v - 128;
 
-            /* YUV를 RGB로 전환: Y0 + U + V */
-            r = clip((298 * y0 + 409 * v + 128) >> 8, 0, 255);
-            g = clip((298 * y0 - 100 * u - 208 * v + 128) >> 8, 0, 255);
-            b = clip((298 * y0 + 516 * u + 128) >> 8, 0, 255);
-            pixel = ((r>>3)<<11)|((g>>2)<<5)|(b>>3);      /* 16비트 컬러로 전환 */
-            rgb[loc++] = pixel;
+    // YUV를 RGB로 변환
+    *r = (298 * c + 409 * e + 128) >> 8;
+    *g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+    *b = (298 * c + 516 * d + 128) >> 8;
 
-            /* YUV를 RGB로 전환 : Y1 + U + V */
-            r = clip((298 * y1 + 409 * v + 128) >> 8, 0, 255);
-            g = clip((298 * y1 - 100 * u - 208 * v + 128) >> 8, 0, 255);
-            b = clip((298 * y1 + 516 * u + 128) >> 8, 0, 255);
-            pixel = ((r>>3)<<11)|((g>>2)<<5)|(b>>3);      /* 16비트 컬러로 전환 */
-            rgb[loc++] = pixel;
+    // 값 클리핑
+    *r = (*r < 0) ? 0 : (*r > 255) ? 255 : *r;
+    *g = (*g < 0) ? 0 : (*g > 255) ? 255 : *g;
+    *b = (*b < 0) ? 0 : (*b > 255) ? 255 : *b;
+
+    // R과 B를 교환
+    int temp = *r;
+    *r = *b;
+    *b = temp;
+}
+
+// YUYV422를 RGBA로 변환하는 함수
+void yuyv2Rgba(uchar *yuyv, uchar *rgba, int width, int height) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x += 2) {
+            // YUYV422는 2픽셀당 4바이트 (Y0, U, Y1, V)
+            uchar y0 = yuyv[y * width * 2 + x * 2];
+            uchar u  = yuyv[y * width * 2 + x * 2 + 1];
+            uchar y1 = yuyv[y * width * 2 + x * 2 + 2];
+            uchar v  = yuyv[y * width * 2 + x * 2 + 3];
+
+            // YUV를 RGB로 변환
+            int r0, g0, b0, r1, g1, b1;
+            yuv2rgb(y0, u, v, &r0, &g0, &b0);
+            yuv2rgb(y1, u, v, &r1, &g1, &b1);
+
+            // RGBA로 변환 (Alpha는 255로 설정)
+            rgba[y * width * 4 + x * 4] = r0;
+            rgba[y * width * 4 + x * 4 + 1] = g0;
+            rgba[y * width * 4 + x * 4 + 2] = b0;
+            rgba[y * width * 4 + x * 4 + 3] = 255; // Alpha
+
+            rgba[y * width * 4 + (x + 1) * 4] = r1;
+            rgba[y * width * 4 + (x + 1) * 4 + 1] = g1;
+            rgba[y * width * 4 + (x + 1) * 4 + 2] = b1;
+            rgba[y * width * 4 + (x + 1) * 4 + 3] = 255; // Alpha
         }
-        in += istride;
     }
 }
 
@@ -244,6 +252,18 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    // FPS 계산을 위한 변수
+    struct timespec start_time, end_time;
+    long frame_count = 0;
+    int fps = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    printf("vinfo.xres: %d\n", vinfo.xres);
+    printf("vinfo.yres: %d\n", vinfo.yres);
+    printf("width: %d\n", WIDTH);
+    printf("height %d\n", HEIGHT);
+
     // V4L2를 이용한 영상의 캡쳐 및 표시
     while (cond) {
         // 버퍼 초기화
@@ -259,10 +279,20 @@ int main(int argc, char** argv)
             break;
         }
         
-        // YUYV 데이터를 RGB565로 변환
-	printf("buf.index: %d\n", buf.index);
-	// init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다. 
-        yuyv2Rgb565(buffers[buf.index].start, rgbBuffer, WIDTH, HEIGHT);
+        // init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다. 
+        yuyv2Rgba(buffers[buf.index].start, rgbBuffer, WIDTH, HEIGHT);
+
+        frame_count++;
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        double elapsed_time = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+        if (elapsed_time >= 1.0) {
+            fps = frame_count / elapsed_time;
+            frame_count = 0;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            // 콘솔에 FPS 출력
+            printf("FPS: %d\n", fps);
+        }
 
 
         // 프레임버퍼에 RGB565 데이터 쓰기
