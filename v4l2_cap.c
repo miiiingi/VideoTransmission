@@ -10,8 +10,8 @@
 #include <linux/fb.h>
 #include <linux/videodev2.h>
 
-#define WIDTH 		    800
-#define HEIGHT 		    600  
+#define WIDTH 		    1920
+#define HEIGHT 		    1080 
 #define BUFFER_COUNT	4  	// 버퍼의 개수
 #define VIDEO_DEV     "/dev/video0"
 #define FB_DEV        "/dev/fb0"
