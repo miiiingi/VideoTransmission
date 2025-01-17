@@ -60,13 +60,9 @@ __device__ void yuv2rgb_device(uchar y, uchar u, uchar v, int *r, int *g, int *b
     *g = (298 * c - 100 * d - 208 * e + 128) >> 8;
     *b = (298 * c + 516 * d + 128) >> 8;
 
-    // 클리핑
-    *r = (*r < 0) ? 0 : (*r > 255) ? 255
-                                   : *r;
-    *g = (*g < 0) ? 0 : (*g > 255) ? 255
-                                   : *g;
-    *b = (*b < 0) ? 0 : (*b > 255) ? 255
-                                   : *b;
+    *r = min(max(*r, 0), 255);
+    *g = min(max(*g, 0), 255);
+    *b = min(max(*b, 0), 255);
 
     // R과 B 교환
     int temp = *r;
@@ -77,36 +73,62 @@ __device__ void yuv2rgb_device(uchar y, uchar u, uchar v, int *r, int *g, int *b
 // YUYV를 RGBA로 변환하는 CUDA 커널
 __global__ void yuyv2rgba_kernel(const uchar *yuyv, uchar *rgba, int width, int height)
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int x = (blockIdx.x * blockDim.x + threadIdx.x) * 2; // YUYV는 2픽셀 단위로 처리
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= width || y >= height)
         return;
 
-    // 2픽셀씩 처리 (YUYV 포맷 특성상)
-    x *= 2;
-    if (x < width - 1)
+    uchar y0 = yuyv[y * width * 2 + x * 2];
+    uchar u = yuyv[y * width * 2 + x * 2 + 1];
+    uchar y1 = yuyv[y * width * 2 + x * 2 + 2];
+    uchar v = yuyv[y * width * 2 + x * 2 + 3];
+
+    int r0, g0, b0, r1, g1, b1;
+    yuv2rgb_device(y0, u, v, &r0, &g0, &b0);
+    yuv2rgb_device(y1, u, v, &r1, &g1, &b1);
+
+    // 첫 번째 픽셀
+    rgba[y * width * 4 + x * 4] = r0;
+    rgba[y * width * 4 + x * 4 + 1] = g0;
+    rgba[y * width * 4 + x * 4 + 2] = b0;
+    rgba[y * width * 4 + x * 4 + 3] = 255;
+
+    // 두 번째 픽셀
+    rgba[y * width * 4 + (x + 1) * 4] = r1;
+    rgba[y * width * 4 + (x + 1) * 4 + 1] = g1;
+    rgba[y * width * 4 + (x + 1) * 4 + 2] = b1;
+    rgba[y * width * 4 + (x + 1) * 4 + 3] = 255;
+}
+
+void gpuInfo()
+{
+    int deviceCount;
+    cudaGetDeviceCount(&deviceCount);
+    printf("Number of CUDA devices: %d\n", deviceCount);
+
+    for (int i = 0; i < deviceCount; i++)
     {
-        uchar y0 = yuyv[y * width * 2 + x * 2];
-        uchar u = yuyv[y * width * 2 + x * 2 + 1];
-        uchar y1 = yuyv[y * width * 2 + x * 2 + 2];
-        uchar v = yuyv[y * width * 2 + x * 2 + 3];
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, i);
 
-        int r0, g0, b0, r1, g1, b1;
-        yuv2rgb_device(y0, u, v, &r0, &g0, &b0);
-        yuv2rgb_device(y1, u, v, &r1, &g1, &b1);
-
-        // 첫 번째 픽셀
-        rgba[y * width * 4 + x * 4] = r0;
-        rgba[y * width * 4 + x * 4 + 1] = g0;
-        rgba[y * width * 4 + x * 4 + 2] = b0;
-        rgba[y * width * 4 + x * 4 + 3] = 255;
-
-        // 두 번째 픽셀
-        rgba[y * width * 4 + (x + 1) * 4] = r1;
-        rgba[y * width * 4 + (x + 1) * 4 + 1] = g1;
-        rgba[y * width * 4 + (x + 1) * 4 + 2] = b1;
-        rgba[y * width * 4 + (x + 1) * 4 + 3] = 255;
+        printf("Device %d: %s\n", i, prop.name);
+        printf("  Compute capability: %d.%d\n", prop.major, prop.minor);
+        printf("  Total global memory: %lu bytes\n", prop.totalGlobalMem);
+        printf("  Shared memory per block: %lu bytes\n", prop.sharedMemPerBlock);
+        printf("  Registers per block: %d\n", prop.regsPerBlock);
+        printf("  Warp size: %d\n", prop.warpSize);
+        printf("  Max threads per block: %d\n", prop.maxThreadsPerBlock);
+        printf("  Max thread dimensions: (%d, %d, %d)\n",
+               prop.maxThreadsDim[0],
+               prop.maxThreadsDim[1],
+               prop.maxThreadsDim[2]);
+        printf("  Max grid dimensions: (%d, %d, %d)\n",
+               prop.maxGridSize[0],
+               prop.maxGridSize[1],
+               prop.maxGridSize[2]);
+        printf("  Number of SMs: %d\n", prop.multiProcessorCount);
+        printf("  Clock rate: %d kHz\n", prop.clockRate);
     }
 }
 
@@ -119,9 +141,9 @@ cudaError_t process_frame_cuda(const uchar *yuyv, uchar *rgba)
     uchar *d_rgba = NULL; // 디바이스 RGBA 버퍼
 
     // 커널 실행 설정
-    dim3 block_size(16, 16);
-    dim3 grid_size((WIDTH / 2 + block_size.x - 1) / block_size.x,
-                   (HEIGHT + block_size.y - 1) / block_size.y);
+    dim3 block_size(32, 32);
+    // 정수로 나눠주기 위해 아래와 같이 연산
+    dim3 grid_size((WIDTH + block_size.x * 2 - 1) / block_size.x * 2, (HEIGHT + block_size.y - 1) / block_size.y);
 
     cudaError_t cudaStatus;
 
@@ -369,9 +391,15 @@ int main(int argc, char **argv)
     printf("width: %d\n", WIDTH);
     printf("height %d\n", HEIGHT);
 
+    gpuInfo();
     // V4L2를 이용한 영상의 캡쳐 및 표시
     while (cond)
     {
+        if (cond >= 100)
+        {
+            break;
+        }
+
         // 버퍼 초기화
         memset(&buf, 0, sizeof(buf));
 
@@ -388,7 +416,6 @@ int main(int argc, char **argv)
 
         // init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다.
         cudaError_t cudaStatus = process_frame_cuda((const uchar *)buffers[buf.index].start, rgbBuffer);
-        fprintf(stderr, "cudaError : %d\n", cudaStatus);
         if (cudaStatus != cudaSuccess)
         {
             fprintf(stderr, "addWithCuda failed!");
@@ -417,6 +444,8 @@ int main(int argc, char **argv)
             perror("Failed to queue buffer");
             break;
         }
+
+        cond++;
     }
 
     printf("\nGood Bye!!!\n");
