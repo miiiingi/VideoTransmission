@@ -19,9 +19,30 @@
 #define FB_DEV "/dev/fb0"
 
 typedef unsigned char uchar;
+typedef unsigned int uint;
+
+// CUDA 디바이스 메모리 포인터들
+uchar *d_yuyv = NULL; // 디바이스 YUYV 버퍼
+uint *d_rgba = NULL;  // 디바이스 RGBA 버퍼
+
+// // 커널 실행 설정
+// dim3 block_size(32, 32);
+// // 정수로 나눠주기 위해 아래와 같이 연산
+// dim3 grid_size((WIDTH + block_size.x * 2 - 1) / block_size.x * 2, (HEIGHT + block_size.y - 1) / block_size.y);
+
+// 커널 실행 설정
+int pixelPairs = (WIDTH * HEIGHT) / 2;
+// 정수로 나눠주기 위해 아래와 같이 연산
+// // 커널 실행 설정
+// int blockSize = 256;
+// // 정수로 나눠주기 위해 아래와 같이 연산
+// int numBlocks = (pixelPairs + blockSize - 1) / blockSize;
+// int numBlocks = ((WIDTH * 2 + blockSize - 1) / blockSize) * ((HEIGHT + blockSize - 1) / blockSize);
+int blockSize = 256;
+int numBlocks = (BUFFER_SIZE * 2 + blockSize - 1) / blockSize;
 
 // v4l2_cap.c
-cudaError_t process_frame_cuda(const uchar *yuyv, uchar *rgba);
+cudaError_t process_frame_cuda(const uchar *yuyv, uint *rgba);
 
 struct buffer
 {
@@ -40,17 +61,12 @@ static void sigHandler(int signo)
     cond = 0;
 }
 
-static inline int clip(int value, int min, int max)
-{
-    return (value > max ? max : (value < min ? min : value));
-}
-
 // CUDA 초기화 함수
 #include <cuda_runtime.h>
 #include <stdio.h>
 
 // YUV를 RGB로 변환하는 디바이스 함수
-__device__ void yuv2rgb_device(uchar y, uchar u, uchar v, int *r, int *g, int *b)
+__device__ void yuv2rgb_device(int y, int u, int v, int *r, int *g, int *b)
 {
     int c = y - 16;
     int d = u - 128;
@@ -70,36 +86,119 @@ __device__ void yuv2rgb_device(uchar y, uchar u, uchar v, int *r, int *g, int *b
     *b = temp;
 }
 
-// YUYV를 RGBA로 변환하는 CUDA 커널
-__global__ void yuyv2rgba_kernel(const uchar *yuyv, uchar *rgba, int width, int height)
+// // YUYV를 RGBA로 변환하는 CUDA 커널
+// __global__ void yuyv2rgba_kernel(const uchar *yuyv, uint *rgba, int width, int height, int xres)
+// {
+
+//     uchar *in = (uchar *)yuyv;
+//     int loc = blockIdx.x * blockDim.x + threadIdx.x;
+//     int index = blockIdx.x * blockDim.x + threadIdx.x;
+//     int istride = blockDim.x * gridDim.x; /* 이미지의 폭을 넘어가면 다음 라인으로 내려가도록 설정 */
+//     uint pixel;
+//     for (int y = 0; y < height; ++y)
+//     {
+//         for (int j = index; j < xres * 2; j += istride)
+//         {
+//             if (j >= width * 2)
+//             { /* 현재의 화면에서 이미지를 넘어서는 빈 공간을 처리 */
+//                 loc++;
+//                 loc++;
+//                 continue;
+//             }
+//             /* YUYV 성분을 분리 */
+//             uchar y0 = in[j];
+//             uchar u = in[j + 1] - 128;
+//             uchar y1 = in[j + 2];
+//             uchar v = in[j + 3] - 128;
+
+//             uchar r0, g0, b0, r1, g1, b1;
+//             /* YUV를 RGB로 전환: Y0 + U + V */
+//             r0 = min(max(298 * y0 + 409 * v + 128 >> 8, 0), 255);
+//             g0 = min(max(298 * y0 - 100 * u - 208 * v + 128 >> 8, 0), 255);
+//             b0 = min(max(298 * y0 + 516 * u + 128 >> 8, 0), 255);
+
+//             // 리틀 엔디안 시스템에서 RGBA 값 생성 (A는 255로 설정)
+//             pixel = (255 << 24) | (b0 << 16) | (g0 << 8) | r0; // 첫 번째 픽셀
+//             rgba[loc++] = pixel;
+
+//             /* YUV를 RGB로 전환 : Y1 + U + V */
+//             r1 = min(max(298 * y1 + 409 * v + 128 >> 8, 0), 255);
+//             g1 = min(max(298 * y1 - 100 * u - 208 * v + 128 >> 8, 0), 255);
+//             b1 = min(max(298 * y1 + 516 * u + 128 >> 8, 0), 255);
+
+//             pixel = (255 << 24) | (b1 << 16) | (g1 << 8) | r1; // 두 번째 픽셀
+//             rgba[loc++] = pixel;
+//         }
+//         in += istride;
+//     }
+// }
+__global__ void yuyv2rgba_kernel(const uchar *yuyv, uint *rgba, int width, int height, int xres)
 {
-    int x = (blockIdx.x * blockDim.x + threadIdx.x) * 2; // YUYV는 2픽셀 단위로 처리
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
 
-    if (x >= width || y >= height)
-        return;
+    for (int i = index; i < width * height; i += stride)
+    {
+        int x = (i % (width * 2)) / 2; // 픽셀의 x 좌표
+        int y = i / (width * 2);       // 픽셀의 y 좌표
+        if (x >= width || y >= height)
+            continue;
 
-    uchar y0 = yuyv[y * width * 2 + x * 2];
-    uchar u = yuyv[y * width * 2 + x * 2 + 1];
-    uchar y1 = yuyv[y * width * 2 + x * 2 + 2];
-    uchar v = yuyv[y * width * 2 + x * 2 + 3];
+        int j = y * width * 2 + x * 2;
 
-    int r0, g0, b0, r1, g1, b1;
-    yuv2rgb_device(y0, u, v, &r0, &g0, &b0);
-    yuv2rgb_device(y1, u, v, &r1, &g1, &b1);
+        uchar y0 = yuyv[j];
+        uchar u = yuyv[j + 1] - 128;
+        uchar y1 = yuyv[j + 2];
+        uchar v = yuyv[j + 3] - 128;
 
-    // 첫 번째 픽셀
-    rgba[y * width * 4 + x * 4] = r0;
-    rgba[y * width * 4 + x * 4 + 1] = g0;
-    rgba[y * width * 4 + x * 4 + 2] = b0;
-    rgba[y * width * 4 + x * 4 + 3] = 255;
+        uchar r0 = min(max(298 * y0 + 409 * v + 128 >> 8, 0), 255);
+        uchar g0 = min(max(298 * y0 - 100 * u - 208 * v + 128 >> 8, 0), 255);
+        uchar b0 = min(max(298 * y0 + 516 * u + 128 >> 8, 0), 255);
 
-    // 두 번째 픽셀
-    rgba[y * width * 4 + (x + 1) * 4] = r1;
-    rgba[y * width * 4 + (x + 1) * 4 + 1] = g1;
-    rgba[y * width * 4 + (x + 1) * 4 + 2] = b1;
-    rgba[y * width * 4 + (x + 1) * 4 + 3] = 255;
+        uchar r1 = min(max(298 * y1 + 409 * v + 128 >> 8, 0), 255);
+        uchar g1 = min(max(298 * y1 - 100 * u - 208 * v + 128 >> 8, 0), 255);
+        uchar b1 = min(max(298 * y1 + 516 * u + 128 >> 8, 0), 255);
+
+        rgba[y * width + x * 2] = (255 << 24) | (b0 << 16) | (g0 << 8) | r0;
+        rgba[y * width + x * 2 + 1] = (255 << 24) | (b1 << 16) | (g1 << 8) | r1;
+    }
 }
+
+// 최적화된 YUYV 처리 커널
+// __global__ void yuyv2rgba_kernel(const uchar *yuyv, uint *rgba, int width, int height, int xres)
+// {
+//     // 각 스레드는 2개의 픽셀을 처리
+//     const int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     const int total_pairs = (width * height) / 2;
+
+//     if (pair_idx < total_pairs)
+//     {
+//         // 현재 픽셀 쌍의 위치 계산
+//         const int y = (pair_idx * 2) / width;
+//         const int x = (pair_idx * 2) % width;
+
+//         // YUYV 버퍼에서의 인덱스 계산 (4바이트 단위)
+//         const int yuyv_idx = (y * xres + x) * 2;
+
+//         // YUYV 성분 추출
+//         int y0 = yuyv[yuyv_idx];
+//         int u = yuyv[yuyv_idx + 1];
+//         int y1 = yuyv[yuyv_idx + 2];
+//         int v = yuyv[yuyv_idx + 3];
+
+//         // 첫 번째 픽셀 처리
+//         int r0, g0, b0;
+//         yuv2rgb_device(y0, u, v, &r0, &g0, &b0);
+//         printf("r0: %d, g0: %d, b0: %d\n", r0, g0, b0);
+//         rgba[pair_idx * 2] = (r0 << 24) | (g0 << 16) | (b0 << 8) | 255;
+
+//         // 두 번째 픽셀 처리
+//         int r1, g1, b1;
+//         yuv2rgb_device(y1, u, v, &r1, &g1, &b1);
+//         printf("r1: %d, g1: %d, b1: %d\n", r1, g1, b1);
+//         rgba[pair_idx * 2 + 1] = (r1 << 24) | (g1 << 16) | (b1 << 8) | 255;
+//     }
+// }
 
 void gpuInfo()
 {
@@ -133,17 +232,8 @@ void gpuInfo()
 }
 
 // CUDA 처리 함수
-cudaError_t process_frame_cuda(const uchar *yuyv, uchar *rgba)
+cudaError_t process_frame_cuda(const uchar *yuyv, uint *rgba)
 {
-
-    // CUDA 디바이스 메모리 포인터들
-    uchar *d_yuyv = NULL; // 디바이스 YUYV 버퍼
-    uchar *d_rgba = NULL; // 디바이스 RGBA 버퍼
-
-    // 커널 실행 설정
-    dim3 block_size(32, 32);
-    // 정수로 나눠주기 위해 아래와 같이 연산
-    dim3 grid_size((WIDTH + block_size.x * 2 - 1) / block_size.x * 2, (HEIGHT + block_size.y - 1) / block_size.y);
 
     cudaError_t cudaStatus;
 
@@ -162,7 +252,7 @@ cudaError_t process_frame_cuda(const uchar *yuyv, uchar *rgba)
         goto Error;
     }
 
-    cudaStatus = cudaMalloc(&d_rgba, BUFFER_SIZE * 4 * sizeof(uchar)); // RGBA 버퍼
+    cudaStatus = cudaMalloc(&d_rgba, BUFFER_SIZE * sizeof(uint)); // RGBA 버퍼
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to allocate d_rgba: %s\n", cudaGetErrorString(cudaStatus));
@@ -178,7 +268,7 @@ cudaError_t process_frame_cuda(const uchar *yuyv, uchar *rgba)
     }
 
     // 커널 실행
-    yuyv2rgba_kernel<<<grid_size, block_size>>>(d_yuyv, d_rgba, WIDTH, HEIGHT);
+    yuyv2rgba_kernel<<<1, 1>>>(d_yuyv, d_rgba, WIDTH, HEIGHT, vinfo.xres);
 
     // 커널 실행 오류 체크
     cudaStatus = cudaGetLastError();
@@ -189,7 +279,7 @@ cudaError_t process_frame_cuda(const uchar *yuyv, uchar *rgba)
     }
 
     // 결과를 CPU로 복사
-    cudaStatus = cudaMemcpy(rgba, d_rgba, BUFFER_SIZE * 4 * sizeof(uchar), cudaMemcpyDeviceToHost);
+    cudaStatus = cudaMemcpy(rgba, d_rgba, BUFFER_SIZE * sizeof(uint), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to copy rgba to host: %s\n", cudaGetErrorString(cudaStatus));
@@ -204,7 +294,7 @@ Error:
 }
 
 // 프레임버퍼를 설정하는 함수
-int init_framebuffer(uchar **fbPtr, int *size)
+int init_framebuffer(uint **fbPtr, int *size)
 {
     // frame buffer 장치 열기
     int fd = open(FB_DEV, O_RDWR);
@@ -228,7 +318,7 @@ int init_framebuffer(uchar **fbPtr, int *size)
     printf("vinfo.bits_per_pixel: %d\n", vinfo.bits_per_pixel);
     *size = vinfo.yres_virtual * vinfo.xres_virtual * vinfo.bits_per_pixel / 8;
     // mmap을 통해 메모리를 매핑하여 물리 메모리와 프레임 버퍼를 연결, 매핑된 메모리 주소가 반환되며, 이주소를 사용해 프레임버퍼에 데이터를 직접 쓸 수 있다.
-    *fbPtr = (uchar *)mmap(0, *size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    *fbPtr = (uint *)mmap(0, *size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (*fbPtr == MAP_FAILED)
     {
         perror("Failed to mmap framebuffer");
@@ -346,7 +436,7 @@ static int init_v4l2(int *fd, struct buffer *buffers)
 
 int main(int argc, char **argv)
 {
-    uchar *rgbBuffer, *fbPtr;
+    uint *rgbBuffer, *fbPtr;
     int cam_fd, fb_fd;
     int fbSize; // YUYV는 픽셀당 2바이트
     struct buffer buffers[BUFFER_COUNT];
@@ -371,7 +461,7 @@ int main(int argc, char **argv)
 
     // 영상을 저장할 메모리 할당
     printf("fbSize: %d\n", fbSize);
-    rgbBuffer = (uchar *)malloc(fbSize);
+    rgbBuffer = (uint *)malloc(fbSize);
     if (!rgbBuffer)
     {
         perror("Failed to allocate buffers");
