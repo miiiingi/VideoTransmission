@@ -13,8 +13,10 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include "cudaMath.h"
 #include <opencv2/opencv.hpp>
+
+#include "DS_timer.h"
+#include "DS_definitions.h"
 
 #define WIDTH 1920
 #define HEIGHT 1080
@@ -25,8 +27,11 @@
 
 typedef unsigned char uchar;
 
-cudaError_t process_frame_cuda(const uchar *yuyv, uchar4 *rgba);
+cudaError_t process_frame_cuda(const uchar *yuyv, uchar4 *rgba, DS_timer &timer);
 cudaError_t launchYUYV(uchar2 *input, size_t inputPitch, uchar4 *output, size_t outputPitch, size_t width, size_t height);
+void saveImage(const std::string &filename, uchar4 *data, int width, int height);
+int init_framebuffer(uchar4 **fbPtr, int *size);
+static int init_v4l2(int *fd, struct buffer *buffers);
 
 struct buffer
 {
@@ -43,6 +48,11 @@ static __host__ __device__ __forceinline__ uchar8 make_uchar8(uint8_t a0, uint8_
 {
     uchar8 val = {a0, a1, a2, a3, a4, a5, a6, a7};
     return val;
+}
+
+static inline int clip(int value, int min, int max)
+{
+    return (value > max ? max : (value < min ? min : value));
 }
 
 static int cond = 1;
@@ -83,14 +93,57 @@ __global__ void yuyvToRgba(uchar4 *src, int srcAlignedWidth, uchar8 *dst, int ds
                                    y1 - 0.3455f * u - 0.7169f * v,
                                    y1 + 1.4065f * v, 255.0f);
 
-    dst[y * dstAlignedWidth + x] = make_uchar8(clamp(px0.x, 0.0f, 255.0f),
-                                               clamp(px0.y, 0.0f, 255.0f),
-                                               clamp(px0.z, 0.0f, 255.0f),
-                                               clamp(px0.w, 0.0f, 255.0f),
-                                               clamp(px1.x, 0.0f, 255.0f),
-                                               clamp(px1.y, 0.0f, 255.0f),
-                                               clamp(px1.z, 0.0f, 255.0f),
-                                               clamp(px1.w, 0.0f, 255.0f));
+    dst[y * dstAlignedWidth + x] = make_uchar8(
+        (uint8_t)fminf(fmaxf(px0.x, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px0.y, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px0.z, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px0.w, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px1.x, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px1.y, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px1.z, 0.0f), 255.0f),
+        (uint8_t)fminf(fmaxf(px1.w, 0.0f), 255.0f));
+}
+// YUYV 데이터를 RGB565로 변환하는 함수
+void yuyvToRgbaHost(uchar *yuyv, uchar4 *rgb, int width, int height)
+{
+    uchar *in = (uchar *)yuyv;
+    uchar4 pixel;
+    int istride = width * 2; /* 이미지의 폭을 넘어가면 다음 라인으로 내려가도록 설정 */
+    int x, y, j;
+    int y0, u, y1, v, r, g, b;
+    long loc = 0;
+    for (y = 0; y < height; ++y)
+    {
+        for (j = 0, x = 0; j < vinfo.xres * 2; j += 4, x += 2)
+        {
+            if (j >= width * 2)
+            { /* 현재의 화면에서 이미지를 넘어서는 빈 공간을 처리 */
+                loc++;
+                loc++;
+                continue;
+            }
+            /* YUYV 성분을 분리 */
+            y0 = in[j];
+            u = in[j + 1] - 128;
+            y1 = in[j + 2];
+            v = in[j + 3] - 128;
+
+            /* YUV를 RGB로 전환: Y0 + U + V */
+            b = clip((298 * y0 + 409 * v + 128) >> 8, 0, 255);
+            g = clip((298 * y0 - 100 * u - 208 * v + 128) >> 8, 0, 255);
+            r = clip((298 * y0 + 516 * u + 128) >> 8, 0, 255);
+            const uchar4 px0 = make_uchar4(r, g, b, 255);
+            rgb[loc++] = px0;
+
+            /* YUV를 RGB로 전환 : Y1 + U + V */
+            b = clip((298 * y1 + 409 * v + 128) >> 8, 0, 255);
+            g = clip((298 * y1 - 100 * u - 208 * v + 128) >> 8, 0, 255);
+            r = clip((298 * y1 + 516 * u + 128) >> 8, 0, 255);
+            const uchar4 px1 = make_uchar4(r, g, b, 255);
+            rgb[loc++] = px1;
+        }
+        in += istride;
+    }
 }
 
 void saveImage(const std::string &filename, uchar4 *data, int width, int height)
@@ -103,9 +156,10 @@ void saveImage(const std::string &filename, uchar4 *data, int width, int height)
 }
 
 // CUDA 처리 함수
-cudaError_t process_frame_cuda(uchar *yuyv, uchar4 *rgba)
+cudaError_t process_frame_cuda(uchar *yuyv, uchar4 *rgba, DS_timer &timer)
 {
 
+    uchar *in = (uchar *)yuyv;
     // CUDA 디바이스 메모리 포인터들
     uchar2 *d_yuyv = NULL; // 디바이스 YUYV 버퍼
     uchar4 *d_rgba = NULL; // 디바이스 RGBA 버퍼
@@ -116,7 +170,7 @@ cudaError_t process_frame_cuda(uchar *yuyv, uchar4 *rgba)
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-        goto Error;
+        return cudaStatus;
     }
 
     // GPU 메모리 할당
@@ -135,15 +189,19 @@ cudaError_t process_frame_cuda(uchar *yuyv, uchar4 *rgba)
     }
 
     // 입력 데이터를 GPU로 복사
-    cudaStatus = cudaMemcpy(d_yuyv, reinterpret_cast<uchar2 *>(yuyv), BUFFER_SIZE * sizeof(uchar2), cudaMemcpyHostToDevice);
+    timer.onTimer(2);
+    cudaStatus = cudaMemcpy(d_yuyv, reinterpret_cast<uchar2 *>(in), BUFFER_SIZE * sizeof(uchar2), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to copy yuyv to device yuyv: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
+    timer.offTimer(2);
 
     // 커널 실행
+    timer.onTimer(1);
     cudaStatus = launchYUYV(d_yuyv, WIDTH * sizeof(uchar2), d_rgba, WIDTH * sizeof(uchar4), WIDTH, HEIGHT);
+    timer.offTimer(1);
 
     // 커널 실행 오류 체크
     cudaStatus = cudaGetLastError();
@@ -154,17 +212,25 @@ cudaError_t process_frame_cuda(uchar *yuyv, uchar4 *rgba)
     }
 
     // 결과를 CPU로 복사
+    timer.onTimer(3);
     cudaStatus = cudaMemcpy(rgba, d_rgba, BUFFER_SIZE * sizeof(uchar4), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to copy rgba to host: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
+    timer.offTimer(3);
 
 Error:
-    cudaFree(d_yuyv);
-    cudaFree(d_rgba);
+    if (d_yuyv)
+    {
+        cudaFree(d_yuyv);
+    }
 
+    if (d_rgba)
+    {
+        cudaFree(d_rgba);
+    }
     return cudaStatus;
 }
 
@@ -182,6 +248,7 @@ cudaError_t launchYUYV(uchar2 *input, size_t inputPitch, uchar4 *output, size_t 
     const int dstAlignedWidth = outputPitch / sizeof(uchar8); // normally would be uchar4 ^^^
 
     yuyvToRgba<<<grid, block>>>((uchar4 *)input, srcAlignedWidth, (uchar8 *)output, dstAlignedWidth, width, height);
+    cudaDeviceSynchronize();
 
     return cudaGetLastError();
 }
@@ -329,13 +396,21 @@ static int init_v4l2(int *fd, struct buffer *buffers)
 
 int main(int argc, char **argv)
 {
-    uchar4 *rgbBuffer, *fbPtr;
+    uchar4 *rgbBuffer, *rgbBufferH, *fbPtr;
     int cam_fd, fb_fd;
     int fbSize; // YUYV는 픽셀당 2바이트
     struct buffer buffers[BUFFER_COUNT];
     struct v4l2_buffer buf; // V4L2에서 사용할 메모리 버퍼
 
     signal(SIGINT, sigHandler);
+
+    DS_timer timer(5);
+    timer.setTimerName(0, (char *)"CUDA Total");
+    timer.setTimerName(1, (char *)"Computation(Kernel)");
+    timer.setTimerName(2, (char *)"Data Trans. : Host -> Device");
+    timer.setTimerName(3, (char *)"Data Trans. : Device -> Host");
+    timer.setTimerName(4, (char *)"Host Performance");
+    timer.initTimers();
 
     // V4L2 초기화
     if (init_v4l2(&cam_fd, buffers) < 0)
@@ -356,6 +431,14 @@ int main(int argc, char **argv)
     printf("fbSize: %d\n", fbSize);
     rgbBuffer = (uchar4 *)malloc(fbSize);
     if (!rgbBuffer)
+    {
+        perror("Failed to allocate buffers");
+        close(fb_fd);
+        return -1;
+    }
+
+    rgbBufferH = (uchar4 *)malloc(fbSize);
+    if (!rgbBufferH)
     {
         perror("Failed to allocate buffers");
         close(fb_fd);
@@ -390,15 +473,21 @@ int main(int argc, char **argv)
         }
 
         // init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다.
-        cudaError_t cudaStatus = process_frame_cuda((uchar *)buffers[buf.index].start, rgbBuffer);
+        timer.onTimer(0);
+        cudaError_t cudaStatus = process_frame_cuda((uchar *)buffers[buf.index].start, rgbBuffer, timer);
         if (cudaStatus != cudaSuccess)
         {
             fprintf(stderr, "addWithCuda failed!");
             return 1;
         }
+        timer.onTimer(4);
+        yuyvToRgbaHost((uchar *)buffers[buf.index].start, rgbBufferH, WIDTH, HEIGHT);
+        timer.offTimer(4);
+        timer.offTimer(0);
 
         // memcpy(fbPtr, rgbBuffer, fbSize);
-        saveImage("output.jpg", rgbBuffer, WIDTH, HEIGHT);
+        saveImage("outputC.jpg", rgbBuffer, WIDTH, HEIGHT);
+        saveImage("outputH.jpg", rgbBufferH, WIDTH, HEIGHT);
 
         // 버퍼를 다시 큐에 넣기
         if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0)
@@ -406,6 +495,7 @@ int main(int argc, char **argv)
             perror("Failed to queue buffer");
             break;
         }
+        timer.printTimer();
 
         cond++;
     }
