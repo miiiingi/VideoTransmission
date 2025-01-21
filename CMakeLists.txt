@@ -14,8 +14,6 @@ find_package(CUDA REQUIRED)
 find_package(OpenCV REQUIRED)
 enable_language(CUDA)
 
-# CUDA 라이브러리 경로 추가
-link_directories(/usr/local/cuda/lib64)
 
 # FFmpeg 라이브러리 찾기
 
@@ -25,11 +23,15 @@ pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
 
+# CUDA 라이브러리 경로 추가
+link_directories(
+    /usr/local/cuda/lib64
+)
+
+
 # 소스 파일 설정
-set(SERVER_SOURCE_FILES v4l2_cap_tcp_server_encode.c)
-set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.c)
-set(SERVER_SOURCE_FILES_BASIC v4l2_cap_tcp_server.c)
-set(CLIENT_SOURCE_FILES_BASIC v4l2_cap_tcp_client.c)
+#set(SERVER_SOURCE_FILES_BASIC v4l2_cap_tcp_server.c)
+#set(CLIENT_SOURCE_FILES_BASIC v4l2_cap_tcp_client.c)
 
 # 헤더 및 라이브러리 포함 디렉토리 추가
 include_directories(
@@ -66,19 +68,39 @@ target_link_libraries(Capture
     pthread
 )
 
+set(SERVER_SOURCE_FILES v4l2_cap_tcp_server_encode.cu)
 # 나머지 실행 파일들은 그대로 유지
 add_executable(VideoServer ${SERVER_SOURCE_FILES})
-target_link_libraries(VideoServer ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
-set_source_files_properties(${SERVER_SOURCE_FILES} PROPERTIES LANGUAGE C)
+target_link_libraries(VideoServer
+    ${CUDA_LIBRARIES} 
+    ${AVUTIL_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+    cudart
+    pthread
+)
+set_target_properties(VideoServer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
 
-add_executable(VideoServerBasic ${SERVER_SOURCE_FILES_BASIC})
-target_link_libraries(VideoServerBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
-set_source_files_properties(${SERVER_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
 
+set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.cu)
 add_executable(VideoClient ${CLIENT_SOURCE_FILES})
-target_link_libraries(VideoClient ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
-set_source_files_properties(${CLIENT_SOURCE_FILES} PROPERTIES LANGUAGE C)
+target_link_libraries(VideoClient
+    ${CUDA_LIBRARIES} 
+    ${AVUTIL_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+    cudart
+    pthread
+)
 
-add_executable(VideoClientBasic ${CLIENT_SOURCE_FILES_BASIC})
-target_link_libraries(VideoClientBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
-set_source_files_properties(${CLIENT_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
+set_target_properties(VideoClient PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
+
+#add_executable(VideoClientBasic ${CLIENT_SOURCE_FILES_BASIC})
+#target_link_libraries(VideoClientBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+#set_source_files_properties(${CLIENT_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
+
+#add_executable(VideoServerBasic ${SERVER_SOURCE_FILES_BASIC})
+#target_link_libraries(VideoServerBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+#set_source_files_properties(${SERVER_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)

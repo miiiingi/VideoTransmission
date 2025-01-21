@@ -12,6 +12,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <linux/videodev2.h>
+#include <cuda_runtime.h>
+
+extern "C"
+{
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
@@ -19,10 +23,11 @@
 #include <libavformat/avformat.h> // AVFormatContext, avformat_alloc_output_context2, av_interleaved_write_frame
 #include <libavformat/avio.h>     // AVIOContext, avio_open, avio_close
 #include <libavutil/avutil.h>     // 기본 유틸리티 함수
+}
 
 #define WIDTH 1920
 #define HEIGHT 1080
-#define BUFFER_SIZE WIDTH *HEIGHT;
+#define BUFFER_SIZE WIDTH *HEIGHT
 #define BUFFER_COUNT 4 // 버퍼의 개수
 #define VIDEO_DEV "/dev/video0"
 #define SERVER_PORT 8080
@@ -235,9 +240,6 @@ void *client_handler(void *arg)
     int client_fd = *((int *)arg);
     free(arg);
 
-    size_t frame_size_in = BUFFER_SIZE * sizeof(uchar2);
-    int frame_size_out = BUFFER_SIZE * 3 / 2;
-
     // FFmpeg 컨텍스트 및 프레임 설정
     AVFrame *pFrameIn = av_frame_alloc();
     if (!pFrameIn)
@@ -285,10 +287,10 @@ void *client_handler(void *arg)
     }
 
     uint8_t *yuv420p_data[3];
-    yuv420p_data[0] = malloc(WIDTH * HEIGHT);             // Y plane
-    yuv420p_data[1] = malloc((WIDTH / 2) * (HEIGHT / 2)); // U plane
-    yuv420p_data[2] = malloc((WIDTH / 2) * (HEIGHT / 2)); // V plane
-                                                          //
+    yuv420p_data[0] = (uint8_t *)malloc(WIDTH * HEIGHT);             // Y plane
+    yuv420p_data[1] = (uint8_t *)malloc((WIDTH / 2) * (HEIGHT / 2)); // U plane
+    yuv420p_data[2] = (uint8_t *)malloc((WIDTH / 2) * (HEIGHT / 2)); // V plane
+                                                                     //
     /*
      * yuv420p에서 h.264로 변환하기 위한 코덱 정의
      */
@@ -359,7 +361,7 @@ void *client_handler(void *arg)
          * pFrameIn: yuyv를 담을 버퍼 buffers[buf.index].start에 담긴 데이터를 복사한다.
          * pFrameOut: yuv420p를 담을 버퍼 yuv_420p_data에 담긴 데이터를 복사한다.
          */
-        if (convert_yuyv422_to_yuv420p(buffers[buf.index].start, yuv420p_data, WIDTH, HEIGHT, sws_ctx, pFrameIn, pFrameOut) == 0)
+        if (convert_yuyv422_to_yuv420p((uint8_t *)buffers[buf.index].start, yuv420p_data, WIDTH, HEIGHT, sws_ctx, pFrameIn, pFrameOut) == 0)
         {
             /*
              * 위에서 정한 인코딩 컨텍스트를 이용해서 pFrameOut에 담긴 yuv420p 데이터를 h.264로 인코딩한다.
