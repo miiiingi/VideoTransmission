@@ -450,12 +450,37 @@ int main(int argc, char **argv)
     printf("width: %d\n", WIDTH);
     printf("height %d\n", HEIGHT);
 
+    // FPS 측정을 위한 변수들
+    static int frameCount = 0;
+    static auto lastTime = std::chrono::high_resolution_clock::now();
+    static float fps = 0.0f;
+
+    // 전체 처리 시간 측정을 위한 변수
+    auto totalStartTime = std::chrono::high_resolution_clock::now();
+    double totalProcessingTime = 0.0;
+
     // V4L2를 이용한 영상의 캡쳐 및 표시
     while (cond)
     {
-        if (cond >= 10)
+        if (cond >= 100)
         {
             break;
+        }
+
+        // 프레임 처리 시작 시간
+        auto frameStartTime = std::chrono::high_resolution_clock::now();
+
+        // 현재 시간 측정
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastTime).count();
+
+        // 1초(1000ms)마다 FPS 계산
+        if (elapsed >= 1000)
+        {
+            fps = frameCount * (1000.0f / elapsed);
+            printf("FPS: %.2f\n", fps);
+            frameCount = 0;
+            lastTime = currentTime;
         }
 
         // 버퍼 초기화
@@ -486,8 +511,8 @@ int main(int argc, char **argv)
         timer.offTimer(0);
 
         // memcpy(fbPtr, rgbBuffer, fbSize);
-        saveImage("outputC.jpg", rgbBuffer, WIDTH, HEIGHT);
-        saveImage("outputH.jpg", rgbBufferH, WIDTH, HEIGHT);
+        // saveImage("outputC.jpg", rgbBuffer, WIDTH, HEIGHT);
+        // saveImage("outputH.jpg", rgbBufferH, WIDTH, HEIGHT);
 
         // 버퍼를 다시 큐에 넣기
         if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0)
@@ -495,10 +520,20 @@ int main(int argc, char **argv)
             perror("Failed to queue buffer");
             break;
         }
-        timer.printTimer();
 
+        frameCount++; // 프레임 카운터 증가
         cond++;
     }
+    timer.printTimer();
+
+    // 전체 처리 시간 계산 및 출력
+    auto totalEndTime = std::chrono::high_resolution_clock::now();
+    totalProcessingTime = std::chrono::duration_cast<std::chrono::milliseconds>(totalEndTime - totalStartTime).count();
+    printf("\nTotal processing statistics:\n");
+    printf("Total time: %.3f seconds\n", totalProcessingTime / 1000.0);
+    printf("Total frames processed: %d\n", cond);
+    printf("Average processing time per frame: %.3f ms\n", totalProcessingTime / cond);
+    printf("Average FPS: %.2f\n", (cond * 1000.0) / totalProcessingTime);
 
     printf("\nGood Bye!!!\n");
 
