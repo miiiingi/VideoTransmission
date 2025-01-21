@@ -83,7 +83,7 @@ target_link_libraries(VideoServer
 set_target_properties(VideoServer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
 
 
-set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.cu)
+set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.cu DS_Timer/DS_timer.cpp)
 add_executable(VideoClient ${CLIENT_SOURCE_FILES})
 target_link_libraries(VideoClient
     ${CUDA_LIBRARIES} 
@@ -91,6 +91,7 @@ target_link_libraries(VideoClient
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
     ${SWSCALE_LIBRARIES}
+    ${OpenCV_LIBRARIES} 
     cudart
     pthread
 )
