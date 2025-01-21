@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)  # CUDA 지원을 위해 3.8 이상 필요
-project(VideoTransmission CUDA C)    # CUDA 언어 지원 추가
+project(VideoTransmission CUDA C CXX)    # CUDA 언어 지원 추가
 
 # C 표준 설정
 set(CMAKE_C_STANDARD 11)
@@ -14,6 +14,9 @@ find_package(CUDA REQUIRED)
 find_package(OpenCV REQUIRED)
 enable_language(CUDA)
 
+# CUDA 라이브러리 경로 추가
+link_directories(/usr/local/cuda/lib64)
+
 # FFmpeg 라이브러리 찾기
 
 find_package(PkgConfig REQUIRED)
@@ -27,7 +30,6 @@ set(SERVER_SOURCE_FILES v4l2_cap_tcp_server_encode.c)
 set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.c)
 set(SERVER_SOURCE_FILES_BASIC v4l2_cap_tcp_server.c)
 set(CLIENT_SOURCE_FILES_BASIC v4l2_cap_tcp_client.c)
-set(CAPTURE_FILES v4l2_cap.cu cudaMath.h)  # .cu 파일 추가
 
 # 헤더 및 라이브러리 포함 디렉토리 추가
 include_directories(
@@ -37,13 +39,19 @@ include_directories(
     ${AVCODEC_INCLUDE_DIRS} 
     ${SWSCALE_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}  # OpenCV 헤더 경로 추가
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/DS_Timer
 )
 
-# CUDA 라이브러리 경로 추가
-link_directories(/usr/local/cuda/lib64)
+# CUDA 소스 파일과 C++ 소스 파일 분리
+set(CUDA_SOURCES v4l2_cap.cu)  # CUDA 소스 파일
+set(CPP_SOURCES DS_Timer/DS_timer.cpp)  # C++ 소스 파일
+
+# DS_timer.cpp를 C++ 파일로 컴파일
+set_source_files_properties(${CPP_SOURCES} PROPERTIES LANGUAGE CXX)
 
 # Capture 실행 파일에 대한 CUDA 설정
-add_executable(Capture ${CAPTURE_FILES})
+add_executable(Capture ${CUDA_SOURCES} ${CPP_SOURCES})
 set_target_properties(Capture PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
 
 # 라이브러리 링크
@@ -61,12 +69,16 @@ target_link_libraries(Capture
 # 나머지 실행 파일들은 그대로 유지
 add_executable(VideoServer ${SERVER_SOURCE_FILES})
 target_link_libraries(VideoServer ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+set_source_files_properties(${SERVER_SOURCE_FILES} PROPERTIES LANGUAGE C)
 
 add_executable(VideoServerBasic ${SERVER_SOURCE_FILES_BASIC})
 target_link_libraries(VideoServerBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+set_source_files_properties(${SERVER_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
 
 add_executable(VideoClient ${CLIENT_SOURCE_FILES})
 target_link_libraries(VideoClient ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+set_source_files_properties(${CLIENT_SOURCE_FILES} PROPERTIES LANGUAGE C)
 
 add_executable(VideoClientBasic ${CLIENT_SOURCE_FILES_BASIC})
 target_link_libraries(VideoClientBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+set_source_files_properties(${CLIENT_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
