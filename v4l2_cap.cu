@@ -362,13 +362,6 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    // FPS 계산을 위한 변수
-    struct timespec start_time, end_time;
-    long frame_count = 0;
-    int fps = 0;
-
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
-
     printf("vinfo.xres: %d\n", vinfo.xres);
     printf("vinfo.yres: %d\n", vinfo.yres);
     printf("width: %d\n", WIDTH);
@@ -402,19 +395,6 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "addWithCuda failed!");
             return 1;
-        }
-
-        frame_count++;
-        clock_gettime(CLOCK_MONOTONIC, &end_time);
-        double elapsed_time = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-        if (elapsed_time >= 1.0)
-        {
-            fps = frame_count / elapsed_time;
-            frame_count = 0;
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
-
-            // 콘솔에 FPS 출력
-            printf("FPS: %d\n", fps);
         }
 
         // memcpy(fbPtr, rgbBuffer, fbSize);
