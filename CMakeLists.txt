@@ -7,7 +7,7 @@ set(CMAKE_C_STANDARD 11)
 # CUDA 컴파일러 설정
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)  # nvcc 경로 지정
+# set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)  # nvcc 경로 지정
 set(CMAKE_CUDA_ARCHITECTURES 87)
 
 find_package(CUDA REQUIRED)

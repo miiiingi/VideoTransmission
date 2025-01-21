@@ -9,9 +9,11 @@
 #include <sys/mman.h>
 #include <linux/fb.h>
 #include <arpa/inet.h>
+#include <opencv2/opencv.hpp>
+#include <cuda_runtime.h>
+
 #include "DS_timer.h"
 #include "DS_definitions.h"
-#include <opencv2/opencv.hpp>
 
 extern "C"
 {
@@ -31,40 +33,6 @@ extern "C"
 #define SERVER_PORT 8080
 #define SERVER_IP "127.0.0.1"
 // get base type (uint8 or float) from vector
-template <class T>
-struct cudaVectorTypeInfo;
-
-template <>
-struct cudaVectorTypeInfo<uchar>
-{
-    typedef uint8_t Base;
-};
-template <>
-struct cudaVectorTypeInfo<uchar3>
-{
-    typedef uint8_t Base;
-};
-template <>
-struct cudaVectorTypeInfo<uchar4>
-{
-    typedef uint8_t Base;
-};
-
-template <>
-struct cudaVectorTypeInfo<float>
-{
-    typedef float Base;
-};
-template <>
-struct cudaVectorTypeInfo<float3>
-{
-    typedef float Base;
-};
-template <>
-struct cudaVectorTypeInfo<float4>
-{
-    typedef float Base;
-};
 
 typedef unsigned char uchar;
 static int cond = 1;
@@ -89,17 +57,19 @@ static int init_framebuffer(uchar4 **fbPtr, int *size);
  * 디버깅을 위해 프레임 버퍼에 출력된 데이터를 bmp 파일로 저장
  * */
 static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, uint8_t **output_data, int frame_num);
-static void save_framebuffer_as_bmp(const char *filename, uchar4 *fbPtr, int width, int height);
 
-static void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int height);
 static inline int clip(int value, int min, int max);
 static void sigHandler(int signo);
-static void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height);
-static void yuv420p_to_rgba(unsigned char *yuv420p_data[3], unsigned short *rgba_data, int width, int height, int fb_width);
+cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer);
+void saveImage(const std::string &filename, uchar4 *data, int width, int height);
+template <typename T, bool formatYV12>
+static cudaError_t launch420ToRGB(uint8_t *srcDev, T *dstDev, size_t width, size_t height, cudaStream_t stream);
 
-// make_vec<T> templates
-template <typename T>
-inline __host__ __device__ T make_vec(typename cudaVectorTypeInfo<T>::Base x, typename cudaVectorTypeInfo<T>::Base y, typename cudaVectorTypeInfo<T>::Base z, typename cudaVectorTypeInfo<T>::Base w) { static_assert(cuda_assert_false<T>::value, "invalid vector type - supported types are uchar3, uchar4, float3, float4"); }
+static inline __device__ float clamp(float x)
+{
+    return fminf(fmaxf(x, 0.0f), 255.0f);
+}
+inline __device__ __host__ int iDivUp(int a, int b) { return (a % b != 0) ? (a / b + 1) : (a / b); }
 
 static inline __device__ float3 YUV2RGB(float Y, float U, float V)
 {
@@ -160,7 +130,7 @@ __global__ void I420ToRGB(uint8_t *srcImage, int srcPitch,
 
     const float3 RGB = YUV2RGB(Y, U, V);
 
-    dstImage[y * width + x] = make_vec<T>(RGB.x, RGB.y, RGB.z, 255);
+    dstImage[y * width + x] = make_uchar4(RGB.x, RGB.y, RGB.z, 255);
 }
 
 int main(int argc, char **argv)
@@ -272,16 +242,21 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    uint8_t *packet_data = (uchar *)malloc(BUFFER_SIZE);
-    uint8_t *I420 = (uchar *)malloc(BUFFER_SIZE);
+    uint8_t *packet_data = (uchar *)malloc(BUFFER_SIZE * 3 / 2 * sizeof(uchar));
+    // uint8_t *I420 = (uchar *)malloc(BUFFER_SIZE * 2 * sizeof(uchar));
     int decode_fn_check = -2;
     int fb_width = vinfo.xres;
     int fb_height = vinfo.yres;
 
     while (cond)
     {
+        if (cond >= 5)
+        {
+            break;
+        }
+
         // recv()로 패킷을 수신
-        bytes_received = recv(sock, packet_data, WIDTH * HEIGHT * 2, 0);
+        bytes_received = recv(sock, packet_data, BUFFER_SIZE * 3 / 2, 0);
         if (bytes_received < 0)
         {
             perror("recv failed");
@@ -299,7 +274,7 @@ int main(int argc, char **argv)
         // 프레임 버퍼 하단에 텍스트 출력 (예: 화면의 마지막 16줄 아래쪽에 출력)
         draw_text_on_framebuffer(text_buffer, 10, fb_height - 16, fbPtr, fb_width, fb_height);
         */
-        printf("\rReceived %zd bytes", bytes_received);
+        printf("\rReceived %zd bytes\n", bytes_received);
         fflush(stdout);
 
         // NAL 유닛인지 확인하고 기록
@@ -309,14 +284,9 @@ int main(int argc, char **argv)
             pkt->size = bytes_received;
             pkt->data = packet_data;
         }
-
-        // H.264 디코딩 후 YUV420P 프레임을 BMP로 저장
-        // decode_fn_check = decode_and_save_frame(dec_ctx, pkt, frame, yuv420p_data, frame_num++);
         // fflush(h264_file); // 데이터를 즉시 파일로 기록
-        // rgba 데이터를 프레임버퍼로 출력
-        // yuv420p_to_rgba(yuv420p_data, rgbBuffer, WIDTH, HEIGHT, fb_width);
-        YUV420P_to_I420(packet_data, I420, WIDTH, HEIGHT);
-        cudaError_t cudaStatus = process_frame_cuda(I420, rgbBuffer, timer);
+
+        cudaError_t cudaStatus = process_frame_cuda(packet_data, rgbBuffer, timer);
         if (cudaStatus != cudaSuccess)
         {
             fprintf(stderr, "addWithCuda failed!");
@@ -326,21 +296,7 @@ int main(int argc, char **argv)
 
         // 프레임버퍼에 RGB 데이터를 복사
         // memcpy(fbPtr, rgbBuffer, fb_height * fb_width * 2);
-
-        /*
-         * 아래의 방법을 통해서 해결했는데 왜 그럴까 ?? 이 문제 해결한 방법 찾아보기
-         */
-        // unsigned char *yuyv_copy = (unsigned char *)malloc(WIDTH * HEIGHT * 2);
-        // memcpy(yuyv_copy, yuyv_data, WIDTH * HEIGHT * 2);
-        //  YUV420P 데이터가 제대로 들어있는지 확인
-        //  YUV420P → YUYV 변환
-
-        // YUYV 데이터를 BMP 파일로 저장
-        // save_yuyv_as_bmp("yuyv_output.bmp", yuyv_copy, WIDTH, HEIGHT);
-        // YUYV → rgba 변환 후 프레임 버퍼로 출력
-        // yuyv2rgba(yuyv_copy, fbPtr, WIDTH, HEIGHT);
-
-        // free(yuyv_copy);  // 변환된 YUYV 데이터 해제
+        cond++;
     }
 
     printf("\nGood Bye!!!\n");
@@ -348,11 +304,9 @@ int main(int argc, char **argv)
     munmap(fbPtr, fbSize);
     free(rgbBuffer);
     free(packet_data);
-    free(I420);
     av_packet_free(&pkt);
     av_frame_free(&frame);
     avcodec_free_context(&dec_ctx);
-    close(cam_fd);
     close(fb_fd);
 
     return 0;
@@ -431,7 +385,7 @@ int init_framebuffer(uchar4 **fbPtr, int *size)
     // mmap을 통해 메모리를 매핑하여 물리 메모리와 프레임 버퍼를 연결, 매핑된 메모리 주소가 반환되며, 이주소를 사용해 프레임버퍼에 데이터를 직접 쓸 수 있다.
     *size = vinfo.yres_virtual * vinfo.xres_virtual * vinfo.bits_per_pixel / 8;
 
-    *fbPtr = (unsigned short *)mmap(0, *size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    *fbPtr = (uchar4 *)mmap(0, *size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (*fbPtr == MAP_FAILED)
     {
         perror("Failed to mmap framebuffer");
@@ -490,69 +444,6 @@ static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame
     return 0;
 }
 
-void save_yuv420p_as_bmp(const char *filename, AVFrame *frame, int width, int height)
-{
-    struct SwsContext *img_convert_ctx = sws_getContext(
-        width, height, AV_PIX_FMT_YUV420P,
-        width, height, AV_PIX_FMT_RGB24,
-        SWS_BICUBIC, NULL, NULL, NULL);
-
-    if (!img_convert_ctx)
-    {
-        fprintf(stderr, "Error initializing sws context\n");
-        return;
-    }
-
-    AVFrame *rgb_frame = av_frame_alloc();
-    int num_bytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width, height, 1);
-    uint8_t *rgb_buffer = (uint8_t *)av_malloc(num_bytes);
-
-    av_image_fill_arrays(rgb_frame->data, rgb_frame->linesize, rgb_buffer, AV_PIX_FMT_RGB24, width, height, 1);
-
-    // YUV420P -> RGB24 변환
-    sws_scale(img_convert_ctx, (const uint8_t *const *)frame->data, frame->linesize, 0, height,
-              rgb_frame->data, rgb_frame->linesize);
-
-    // BMP로 저장
-    FILE *f;
-    unsigned int filesize = 54 + 3 * width * height; // 54바이트 헤더 + 픽셀 데이터 크기
-
-    unsigned char bmpfileheader[14] = {
-        'B', 'M', // 매직 넘버
-        filesize & 0xFF, (filesize >> 8) & 0xFF, (filesize >> 16) & 0xFF, (filesize >> 24) & 0xFF,
-        0, 0, 0, 0, // 예약된 필드
-        54, 0, 0, 0 // 데이터 시작 위치(헤더 크기)
-    };
-    unsigned char bmpinfoheader[40] = {
-        40, 0, 0, 0,                                                                       // 정보 헤더 크기
-        width & 0xFF, (width >> 8) & 0xFF, (width >> 16) & 0xFF, (width >> 24) & 0xFF,     // 이미지 너비
-        height & 0xFF, (height >> 8) & 0xFF, (height >> 16) & 0xFF, (height >> 24) & 0xFF, // 이미지 높이
-        1, 0,                                                                              // 플레인 수
-        24, 0,                                                                             // 비트 수(24 비트)
-        0, 0, 0, 0,                                                                        // 압축 방식(없음)
-        0, 0, 0, 0,                                                                        // 이미지 크기(비압축)
-        0, 0, 0, 0,                                                                        // 수평 해상도
-        0, 0, 0, 0,                                                                        // 수직 해상도
-        0, 0, 0, 0,                                                                        // 색상 수
-        0, 0, 0, 0                                                                         // 중요한 색상 수
-    };
-
-    f = fopen(filename, "wb");
-    fwrite(bmpfileheader, 1, 14, f);
-    fwrite(bmpinfoheader, 1, 40, f);
-
-    // 픽셀 데이터를 저장할 때 역순으로 저장
-    for (int y = height - 1; y >= 0; y--)
-    { // 이미지의 각 라인을 아래에서 위로 읽음
-        fwrite(rgb_frame->data[0] + y * rgb_frame->linesize[0], 1, 3 * width, f);
-    }
-
-    fclose(f);
-    av_free(rgb_buffer);
-    av_frame_free(&rgb_frame);
-    sws_freeContext(img_convert_ctx);
-}
-
 static inline int clip(int value, int min, int max)
 {
     return (value > max ? max : (value < min ? min : value));
@@ -561,73 +452,6 @@ static inline int clip(int value, int min, int max)
 static void sigHandler(int signo)
 {
     cond = 0;
-}
-
-// YUYV 데이터를 BMP로 저장하는 함수 추가
-void save_yuyv_as_bmp(const char *filename, unsigned char *yuyv, int width, int height)
-{
-    FILE *f;
-    unsigned int filesize = 54 + 3 * width * height; // 54바이트 헤더 + 픽셀 데이터 크기
-
-    unsigned char bmpfileheader[14] = {
-        'B', 'M', // 매직 넘버
-        filesize & 0xFF, (filesize >> 8) & 0xFF, (filesize >> 16) & 0xFF, (filesize >> 24) & 0xFF,
-        0, 0, 0, 0, // 예약된 필드
-        54, 0, 0, 0 // 데이터 시작 위치(헤더 크기)
-    };
-    unsigned char bmpinfoheader[40] = {
-        40, 0, 0, 0,                                                                       // 정보 헤더 크기
-        width & 0xFF, (width >> 8) & 0xFF, (width >> 16) & 0xFF, (width >> 24) & 0xFF,     // 이미지 너비
-        height & 0xFF, (height >> 8) & 0xFF, (height >> 16) & 0xFF, (height >> 24) & 0xFF, // 이미지 높이
-        1, 0,                                                                              // 플레인 수
-        24, 0,                                                                             // 비트 수(24 비트)
-        0, 0, 0, 0,                                                                        // 압축 방식(없음)
-        0, 0, 0, 0,                                                                        // 이미지 크기(비압축)
-        0, 0, 0, 0,                                                                        // 수평 해상도
-        0, 0, 0, 0,                                                                        // 수직 해상도
-        0, 0, 0, 0,                                                                        // 색상 수
-        0, 0, 0, 0                                                                         // 중요한 색상 수
-    };
-
-    f = fopen(filename, "wb");
-    fwrite(bmpfileheader, 1, 14, f);
-    fwrite(bmpinfoheader, 1, 40, f);
-
-    // YUYV 데이터를 RGB로 변환하여 BMP로 저장
-    for (int y = 0; y < height; y++)
-    {
-        for (int x = 0; x < width; x += 2)
-        {
-            // YUYV 포맷에서 Y0 U Y1 V 추출
-            unsigned char y0 = yuyv[2 * x];
-            unsigned char u = yuyv[2 * x + 1];
-            unsigned char y1 = yuyv[2 * x + 2];
-            unsigned char v = yuyv[2 * x + 3];
-
-            // YUV를 RGB로 변환 (Y0 U V)
-            int r = clip((298 * y0 + 409 * v + 128) >> 8, 0, 255);
-            int g = clip((298 * y0 - 100 * u - 208 * v + 128) >> 8, 0, 255);
-            int b = clip((298 * y0 + 516 * u + 128) >> 8, 0, 255);
-
-            // BMP 파일에 픽셀 저장 (BGR 순서)
-            fwrite(&b, 1, 1, f);
-            fwrite(&g, 1, 1, f);
-            fwrite(&r, 1, 1, f);
-
-            // YUV를 RGB로 변환 (Y1 U V)
-            r = clip((298 * y1 + 409 * v + 128) >> 8, 0, 255);
-            g = clip((298 * y1 - 100 * u - 208 * v + 128) >> 8, 0, 255);
-            b = clip((298 * y1 + 516 * u + 128) >> 8, 0, 255);
-
-            // BMP 파일에 두 번째 픽셀 저장 (BGR 순서)
-            fwrite(&b, 1, 1, f);
-            fwrite(&g, 1, 1, f);
-            fwrite(&r, 1, 1, f);
-        }
-        yuyv += width * 2; // YUYV는 한 픽셀당 2바이트
-    }
-
-    fclose(f);
 }
 
 // // YUV420P 데이터를 rgba로 변환하는 함수
@@ -683,7 +507,7 @@ cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
     }
 
     // GPU 메모리 할당
-    cudaStatus = cudaMalloc(&d_I420, BUFFER_SIZE * sizeof(uint8_t));
+    cudaStatus = cudaMalloc(&d_I420, BUFFER_SIZE * 3 / 2 * sizeof(uint8_t));
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to allocate d_I420: %s\n", cudaGetErrorString(cudaStatus));
@@ -699,7 +523,7 @@ cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
 
     // 입력 데이터를 GPU로 복사
     timer.onTimer(2);
-    cudaStatus = cudaMemcpy(d_I420, (uint8_t *)in, BUFFER_SIZE * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    cudaStatus = cudaMemcpy(d_I420, in, BUFFER_SIZE * 3 / 2 * sizeof(uint8_t), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to copy yuyv to device yuyv: %s\n", cudaGetErrorString(cudaStatus));
@@ -710,7 +534,7 @@ cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
 
     // 커널 실행
     timer.onTimer(1);
-    cudaStatus = launch420ToRGB<uchar4, false>(d_I420, d_rgba, WIDTH, HEIGHT);
+    cudaStatus = launch420ToRGB<uchar4, true>(d_I420, d_rgba, WIDTH, HEIGHT, 0);
     timer.offTimer(1);
 
     // 커널 실행 오류 체크
@@ -744,23 +568,8 @@ Error:
     return cudaStatus;
 }
 
-void YUV420P_to_I420(uint8_t *yvu420p, uint8_t *i420, int width, int height)
-{
-    int y_size = width * height;
-    int uv_size = (width / 2) * (height / 2);
-
-    // Y 데이터 복사
-    memcpy(i420, yvu420p, y_size);
-
-    // U 데이터 복사 (YVU420P의 V를 I420의 U로)
-    memcpy(i420 + y_size, yvu420p + y_size + uv_size, uv_size);
-
-    // V 데이터 복사 (YVU420P의 U를 I420의 V로)
-    memcpy(i420 + y_size + uv_size, yvu420p + y_size, uv_size);
-}
-
 template <typename T, bool formatYV12>
-static cudaError_t launch420ToRGB(uint8_t *srcDev, T *dstDev, size_t width, size_t height)
+cudaError_t launch420ToRGB(uint8_t *srcDev, T *dstDev, size_t width, size_t height, cudaStream_t stream)
 {
     if (!srcDev || !dstDev)
         return cudaErrorInvalidDevicePointer;
@@ -773,11 +582,25 @@ static cudaError_t launch420ToRGB(uint8_t *srcDev, T *dstDev, size_t width, size
 
     const dim3 blockDim(8, 8);
     // const dim3 gridDim((width+(2*blockDim.x-1))/(2*blockDim.x), (height+(blockDim.y-1))/blockDim.y, 1);
-    int numWidth = (width + blockDim.x - 1) / blockDim.x;
-    int numHeight = (height + blockDim.y - 1) / blockDim.y;
-    const dim3 gridDim(numWidth, numHeight);
+    const dim3 gridDim(iDivUp(width, blockDim.x), iDivUp(height, blockDim.y), 1);
 
-    I420ToRGB<T, formatYV12><<<gridDim, blockDim>>>((uint8_t *)srcDev, srcPitch, dstDev, dstPitch, width, height);
+    // Check for any errors before launching the kernel
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        printf("Pre-kernel launch error: %s\n", cudaGetErrorString(err));
+        return err;
+    }
+
+    I420ToRGB<T, formatYV12><<<gridDim, blockDim, 0, stream>>>(srcDev, srcPitch, dstDev, dstPitch, width, height);
+    cudaDeviceSynchronize();
+
+    // Check for any errors after launching the kernel
+    if (err != cudaSuccess)
+    {
+        printf("Post-kernel launch error: %s\n", cudaGetErrorString(err));
+        return err;
+    }
 
     return cudaGetLastError();
 }
