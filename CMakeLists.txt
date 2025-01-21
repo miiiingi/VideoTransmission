@@ -8,8 +8,10 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)  # nvcc 경로 지정
+set(CMAKE_CUDA_ARCHITECTURES 87)
 
 find_package(CUDA REQUIRED)
+find_package(OpenCV REQUIRED)
 enable_language(CUDA)
 
 # FFmpeg 라이브러리 찾기
@@ -25,7 +27,7 @@ set(SERVER_SOURCE_FILES v4l2_cap_tcp_server_encode.c)
 set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.c)
 set(SERVER_SOURCE_FILES_BASIC v4l2_cap_tcp_server.c)
 set(CLIENT_SOURCE_FILES_BASIC v4l2_cap_tcp_client.c)
-set(CAPTURE_FILES v4l2_cap.cu)  # .cu 파일 추가
+set(CAPTURE_FILES v4l2_cap.cu cudaMath.h)  # .cu 파일 추가
 
 # 헤더 및 라이브러리 포함 디렉토리 추가
 include_directories(
@@ -34,6 +36,7 @@ include_directories(
     ${AVFORMAT_INCLUDE_DIRS} 
     ${AVCODEC_INCLUDE_DIRS} 
     ${SWSCALE_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}  # OpenCV 헤더 경로 추가
 )
 
 # CUDA 라이브러리 경로 추가
@@ -50,6 +53,7 @@ target_link_libraries(Capture
     ${AVFORMAT_LIBRARIES} 
     ${AVCODEC_LIBRARIES} 
     ${SWSCALE_LIBRARIES} 
+    ${OpenCV_LIBRARIES} 
     cudart  # CUDA 런타임 라이브러리
     pthread
 )
