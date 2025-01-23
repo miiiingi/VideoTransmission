@@ -70,8 +70,8 @@ target_link_libraries(Capture
 
 set(SERVER_SOURCE_FILES v4l2_cap_tcp_server_encode.cu)
 # 나머지 실행 파일들은 그대로 유지
-add_executable(VideoServer ${SERVER_SOURCE_FILES})
-target_link_libraries(VideoServer
+add_executable(Server ${SERVER_SOURCE_FILES})
+target_link_libraries(Server
     ${CUDA_LIBRARIES} 
     ${AVUTIL_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
@@ -80,12 +80,12 @@ target_link_libraries(VideoServer
     cudart
     pthread
 )
-set_target_properties(VideoServer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
+set_target_properties(Server PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
 
 
 set(CLIENT_SOURCE_FILES v4l2_cap_tcp_client_encode.cu DS_Timer/DS_timer.cpp)
-add_executable(VideoClient ${CLIENT_SOURCE_FILES})
-target_link_libraries(VideoClient
+add_executable(Client ${CLIENT_SOURCE_FILES})
+target_link_libraries(Client
     ${CUDA_LIBRARIES} 
     ${AVUTIL_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
@@ -96,12 +96,12 @@ target_link_libraries(VideoClient
     pthread
 )
 
-set_target_properties(VideoClient PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
+set_target_properties(Client PROPERTIES CUDA_SEPARABLE_COMPILATION ON)    # 분리 컴파일 활성화
 
-#add_executable(VideoClientBasic ${CLIENT_SOURCE_FILES_BASIC})
-#target_link_libraries(VideoClientBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+#add_executable(ClientBasic ${CLIENT_SOURCE_FILES_BASIC})
+#target_link_libraries(ClientBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
 #set_source_files_properties(${CLIENT_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
 
-#add_executable(VideoServerBasic ${SERVER_SOURCE_FILES_BASIC})
-#target_link_libraries(VideoServerBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
+#add_executable(ServerBasic ${SERVER_SOURCE_FILES_BASIC})
+#target_link_libraries(ServerBasic ${AVUTIL_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${SWSCALE_LIBRARIES} pthread)
 #set_source_files_properties(${SERVER_SOURCE_FILES_BASIC} PROPERTIES LANGUAGE C)
