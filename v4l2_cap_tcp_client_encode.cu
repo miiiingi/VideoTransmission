@@ -56,8 +56,6 @@ static int init_framebuffer(uchar4 **fbPtr, int *size);
 /*
  * 디버깅을 위해 프레임 버퍼에 출력된 데이터를 bmp 파일로 저장
  * */
-static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, uint8_t **output_data, int frame_num);
-
 static inline int clip(int value, int min, int max);
 static void sigHandler(int signo);
 cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer);
@@ -136,9 +134,9 @@ __global__ void I420ToRGB(uint8_t *srcImage, int srcPitch,
 int main(int argc, char **argv)
 {
     signal(SIGINT, sigHandler);
-    int cam_fd, fb_fd;
+    int fb_fd;
     int fbSize; // YUYV는 픽셀당 2바이트
-    uchar4 *rgbBuffer, *rgbBufferH, *fbPtr;
+    uchar4 *rgbBuffer, *fbPtr;
 
     DS_timer timer(5);
     timer.setTimerName(0, (char *)"CUDA Total");
@@ -224,14 +222,15 @@ int main(int argc, char **argv)
 
     // 영상을 저장할 메모리 할당
     rgbBuffer = (uchar4 *)malloc(fbSize);
+    printf("fbSize: %d\n", fbSize);
+    printf("output size: %zu\n", BUFFER_SIZE * sizeof(uchar4));
+
     if (!rgbBuffer)
     {
         perror("Failed to allocate buffers");
         close(fb_fd);
         return -1;
     }
-
-    int frame_num = 0;
 
     // .h264 파일로 저장할 파일 포인터 열기
     FILE *h264_file = fopen("client_received.h264", "wb");
@@ -242,11 +241,7 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    uint8_t *packet_data = (uchar *)malloc(BUFFER_SIZE * 3 / 2 * sizeof(uchar));
-    // uint8_t *I420 = (uchar *)malloc(BUFFER_SIZE * 2 * sizeof(uchar));
-    int decode_fn_check = -2;
-    int fb_width = vinfo.xres;
-    int fb_height = vinfo.yres;
+    uint8_t *packet_data = (uint8_t *)malloc(BUFFER_SIZE * (3 / 2) * sizeof(uint8_t));
 
     while (cond)
     {
@@ -256,7 +251,7 @@ int main(int argc, char **argv)
         }
 
         // recv()로 패킷을 수신
-        bytes_received = recv(sock, packet_data, BUFFER_SIZE * 3 / 2, 0);
+        bytes_received = recv(sock, packet_data, BUFFER_SIZE * (3 / 2) * sizeof(uint8_t), 0);
         if (bytes_received < 0)
         {
             perror("recv failed");
@@ -268,12 +263,6 @@ int main(int argc, char **argv)
             break;
         }
 
-        /*
-        char text_buffer[50];
-        snprintf(text_buffer, sizeof(text_buffer), "\rReceived %zd bytes", bytes_received);
-        // 프레임 버퍼 하단에 텍스트 출력 (예: 화면의 마지막 16줄 아래쪽에 출력)
-        draw_text_on_framebuffer(text_buffer, 10, fb_height - 16, fbPtr, fb_width, fb_height);
-        */
         printf("\rReceived %zd bytes\n", bytes_received);
         fflush(stdout);
 
@@ -396,54 +385,6 @@ int init_framebuffer(uchar4 **fbPtr, int *size)
     return fd;
 }
 
-// H.264 디코딩 후 프레임을 BMP로 저장하는 함수
-static int decode_and_save_frame(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame, uint8_t **output_data, int frame_num)
-{
-    int Y_SIZE = WIDTH * HEIGHT;
-    int UV_SIZE = (WIDTH / 2) * (HEIGHT / 2);
-    while (cond)
-    {
-        int ret = avcodec_send_packet(dec_ctx, pkt);
-        if (ret < 0)
-        {
-            fprintf(stderr, "Error sending a packet for decoding\n");
-            return -1;
-        }
-        while (ret >= 0)
-        {
-            ret = avcodec_receive_frame(dec_ctx, frame);
-            if (ret == AVERROR(EAGAIN))
-            {
-                return AVERROR(EAGAIN);
-            }
-            else if (ret == AVERROR_EOF)
-            {
-                return AVERROR_EOF;
-            }
-            else if (ret < 0)
-            {
-                perror("Error during decoding\n");
-                return -1;
-            }
-            // PTS가 유효한지 확인 후 조정
-            if (frame->pts != AV_NOPTS_VALUE)
-            {
-                frame->pts = av_rescale_q(frame->pts, dec_ctx->time_base, (AVRational){1, 120});
-            }
-            memcpy(output_data[0], frame->data[0], Y_SIZE);
-            memcpy(output_data[1], frame->data[1], UV_SIZE);
-            memcpy(output_data[2], frame->data[2], UV_SIZE);
-            /*
-             * yuv420p 데이터 bmp 파일로 저장하는 코드
-            char filename[1024];
-            snprintf(filename, sizeof(filename), "output_frame_%03d.bmp", frame_num);
-            save_yuv420p_as_bmp(filename, frame, WIDTH, HEIGHT);
-            */
-        }
-    }
-    return 0;
-}
-
 static inline int clip(int value, int min, int max)
 {
     return (value > max ? max : (value < min ? min : value));
@@ -492,7 +433,6 @@ static void sigHandler(int signo)
 cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
 {
 
-    uint8_t *in = (uint8_t *)I420;
     // CUDA 디바이스 메모리 포인터들
     uint8_t *d_I420 = NULL;
     uchar4 *d_rgba = NULL;
@@ -507,7 +447,7 @@ cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
     }
 
     // GPU 메모리 할당
-    cudaStatus = cudaMalloc(&d_I420, BUFFER_SIZE * 3 / 2 * sizeof(uint8_t));
+    cudaStatus = cudaMalloc(&d_I420, BUFFER_SIZE * (3 / 2) * sizeof(uint8_t));
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to allocate d_I420: %s\n", cudaGetErrorString(cudaStatus));
@@ -523,7 +463,7 @@ cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
 
     // 입력 데이터를 GPU로 복사
     timer.onTimer(2);
-    cudaStatus = cudaMemcpy(d_I420, in, BUFFER_SIZE * 3 / 2 * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    cudaStatus = cudaMemcpy(d_I420, I420, BUFFER_SIZE * (3 / 2) * sizeof(uint8_t), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess)
     {
         fprintf(stderr, "Failed to copy yuyv to device yuyv: %s\n", cudaGetErrorString(cudaStatus));
@@ -534,7 +474,7 @@ cudaError_t process_frame_cuda(uint8_t *I420, uchar4 *rgba, DS_timer &timer)
 
     // 커널 실행
     timer.onTimer(1);
-    cudaStatus = launch420ToRGB<uchar4, true>(d_I420, d_rgba, WIDTH, HEIGHT, 0);
+    cudaStatus = launch420ToRGB<uchar4, false>(d_I420, d_rgba, WIDTH, HEIGHT, 0);
     timer.offTimer(1);
 
     // 커널 실행 오류 체크
