@@ -1,7 +1,7 @@
 #ifndef _NEON_H
 #define _NEON_H
 typedef unsigned char uchar;
-#include <arm_neon.h>
+#include <immintrin.h>
 
 class NEON
 {

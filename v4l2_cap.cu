@@ -109,7 +109,7 @@ __global__ void yuyvToRgba(uchar4 *src, int srcAlignedWidth, uchar8 *dst, int ds
 
 int main(int argc, char **argv)
 {
-    uchar4 *rgbBuffer, *rgbBufferH, *fbPtr, *aligned_input;
+    uchar4 *rgbBuffer, *rgbBufferH, *rgbBufferHS, *fbPtr;
     int cam_fd, fb_fd;
     int fbSize; // YUYV는 픽셀당 2바이트
     struct buffer buffers[BUFFER_COUNT];
@@ -117,7 +117,7 @@ int main(int argc, char **argv)
 
     signal(SIGINT, sigHandler);
 
-    DS_timer timer(5);
+    DS_timer timer(6);
     timer.setTimerName(0, (char *)"CUDA Total");
     timer.setTimerName(1, (char *)"Computation(Kernel)");
     timer.setTimerName(2, (char *)"Data Trans. : Host -> Device");
@@ -160,6 +160,15 @@ int main(int argc, char **argv)
         close(fb_fd);
         return -1;
     }
+
+    rgbBufferHS = (uchar4 *)malloc(fbSize);
+    if (!rgbBufferHS)
+    {
+        perror("Failed to allocate buffers");
+        close(fb_fd);
+        return -1;
+    }
+
 
     printf("vinfo.xres: %d\n", vinfo.xres);
     printf("vinfo.yres: %d\n", vinfo.yres);
@@ -226,14 +235,15 @@ int main(int argc, char **argv)
         timer.offTimer(4);
         // 정렬된 버퍼 얻기
         timer.onTimer(5);
-        neon.yuyvToRgbaHostSIMD((uchar *)buffers[buf.index].start, rgbBufferH);
+        neon.yuyvToRgbaHostSIMD((uchar *)buffers[buf.index].start, (uchar *)rgbBufferHS);
         timer.offTimer(5);
 
         timer.offTimer(0);
 
         // memcpy(fbPtr, rgbBuffer, fbSize);
         // saveImage("outputC.jpg", rgbBuffer, WIDTH, HEIGHT);
-        saveImage("outputHSIMD.jpg", rgbBufferH, WIDTH, HEIGHT);
+        // saveImage("outputH.jpg", rgbBufferH, WIDTH, HEIGHT);
+        saveImage("outputHS.jpg", rgbBufferHS, WIDTH, HEIGHT);
 
         // 버퍼를 다시 큐에 넣기
         if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0)
@@ -269,8 +279,8 @@ int main(int argc, char **argv)
     }
     munmap(fbPtr, fbSize);
     free(rgbBuffer);
-    free(aligned_input);
-
+    free(rgbBufferH);
+    free(rgbBufferHS);
     // 파일디스크립터 정리
     close(cam_fd);
     close(fb_fd);
