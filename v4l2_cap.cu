@@ -18,6 +18,8 @@
 #include "DS_timer.h"
 #include "DS_definitions.h"
 
+#include "neon.h"
+
 #define WIDTH 1920
 #define HEIGHT 1080
 #define BUFFER_SIZE WIDTH *HEIGHT
@@ -27,10 +29,11 @@
 
 typedef unsigned char uchar;
 
-cudaError_t process_frame_cuda(const uchar *yuyv, uchar4 *rgba, DS_timer &timer);
+cudaError_t process_frame_cuda(uchar *yuyv, uchar4 *rgba, DS_timer &timer);
 cudaError_t launchYUYV(uchar2 *input, size_t inputPitch, uchar4 *output, size_t outputPitch, size_t width, size_t height);
 void saveImage(const std::string &filename, uchar4 *data, int width, int height);
 int init_framebuffer(uchar4 **fbPtr, int *size);
+void yuyvToRgbaHost(uchar *yuyv, uchar4 *rgb, int width, int height);
 static int init_v4l2(int *fd, struct buffer *buffers);
 
 struct buffer
@@ -103,6 +106,178 @@ __global__ void yuyvToRgba(uchar4 *src, int srcAlignedWidth, uchar8 *dst, int ds
         (uint8_t)fminf(fmaxf(px1.z, 0.0f), 255.0f),
         (uint8_t)fminf(fmaxf(px1.w, 0.0f), 255.0f));
 }
+
+int main(int argc, char **argv)
+{
+    uchar4 *rgbBuffer, *rgbBufferH, *fbPtr, *aligned_input;
+    int cam_fd, fb_fd;
+    int fbSize; // YUYV는 픽셀당 2바이트
+    struct buffer buffers[BUFFER_COUNT];
+    struct v4l2_buffer buf; // V4L2에서 사용할 메모리 버퍼
+
+    signal(SIGINT, sigHandler);
+
+    DS_timer timer(5);
+    timer.setTimerName(0, (char *)"CUDA Total");
+    timer.setTimerName(1, (char *)"Computation(Kernel)");
+    timer.setTimerName(2, (char *)"Data Trans. : Host -> Device");
+    timer.setTimerName(3, (char *)"Data Trans. : Device -> Host");
+    timer.setTimerName(4, (char *)"Host Performance");
+    timer.setTimerName(5, (char *)"Host Performance SIMD");
+    timer.initTimers();
+
+    NEON neon(WIDTH, HEIGHT);
+
+    // V4L2 초기화
+    if (init_v4l2(&cam_fd, buffers) < 0)
+    {
+        fprintf(stderr, "V4L2 initialization failed\n");
+        return -1;
+    }
+
+    // 프레임버퍼 초기화
+    fb_fd = init_framebuffer(&fbPtr, &fbSize);
+    if (fb_fd < 0)
+    {
+        fprintf(stderr, "Failed to initialize framebuffer\n");
+        return -1;
+    }
+
+    // 영상을 저장할 메모리 할당
+    printf("fbSize: %d\n", fbSize);
+    rgbBuffer = (uchar4 *)malloc(fbSize);
+    if (!rgbBuffer)
+    {
+        perror("Failed to allocate buffers");
+        close(fb_fd);
+        return -1;
+    }
+
+    rgbBufferH = (uchar4 *)malloc(fbSize);
+    if (!rgbBufferH)
+    {
+        perror("Failed to allocate buffers");
+        close(fb_fd);
+        return -1;
+    }
+
+    printf("vinfo.xres: %d\n", vinfo.xres);
+    printf("vinfo.yres: %d\n", vinfo.yres);
+    printf("width: %d\n", WIDTH);
+    printf("height %d\n", HEIGHT);
+
+    // FPS 측정을 위한 변수들
+    static int frameCount = 0;
+    static auto lastTime = std::chrono::high_resolution_clock::now();
+    static float fps = 0.0f;
+
+    // 전체 처리 시간 측정을 위한 변수
+    auto totalStartTime = std::chrono::high_resolution_clock::now();
+    double totalProcessingTime = 0.0;
+
+    // V4L2를 이용한 영상의 캡쳐 및 표시
+    while (cond)
+    {
+        if (cond >= 10)
+        {
+            break;
+        }
+
+        // 프레임 처리 시작 시간
+        auto frameStartTime = std::chrono::high_resolution_clock::now();
+
+        // 현재 시간 측정
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastTime).count();
+
+        // 1초(1000ms)마다 FPS 계산
+        if (elapsed >= 1000)
+        {
+            fps = frameCount * (1000.0f / elapsed);
+            printf("FPS: %.2f\n", fps);
+            frameCount = 0;
+            lastTime = currentTime;
+        }
+
+        // 버퍼 초기화
+        memset(&buf, 0, sizeof(buf));
+
+        // MMAP 기반으로 영상 캡쳐
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+
+        // STREAMON 명령으로 캡쳐한 비디오 프레임을 디큐한다.
+        if (ioctl(cam_fd, VIDIOC_DQBUF, &buf) < 0)
+        {
+            perror("Failed to dequeue buffer");
+            break;
+        }
+
+        // init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다.
+        timer.onTimer(0);
+        cudaError_t cudaStatus = process_frame_cuda((uchar *)buffers[buf.index].start, rgbBuffer, timer);
+        if (cudaStatus != cudaSuccess)
+        {
+            fprintf(stderr, "addWithCuda failed!");
+            return 1;
+        }
+        timer.onTimer(4);
+        yuyvToRgbaHost((uchar *)buffers[buf.index].start, rgbBufferH, WIDTH, HEIGHT);
+        timer.offTimer(4);
+        // 정렬된 버퍼 얻기
+        timer.onTimer(5);
+        neon.yuyvToRgbaHostSIMD((uchar *)buffers[buf.index].start, rgbBufferH);
+        timer.offTimer(5);
+
+        timer.offTimer(0);
+
+        // memcpy(fbPtr, rgbBuffer, fbSize);
+        // saveImage("outputC.jpg", rgbBuffer, WIDTH, HEIGHT);
+        saveImage("outputHSIMD.jpg", rgbBufferH, WIDTH, HEIGHT);
+
+        // 버퍼를 다시 큐에 넣기
+        if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0)
+        {
+            perror("Failed to queue buffer");
+            break;
+        }
+
+        frameCount++; // 프레임 카운터 증가
+        cond++;
+    }
+    timer.printTimer();
+
+    // 전체 처리 시간 계산 및 출력
+    auto totalEndTime = std::chrono::high_resolution_clock::now();
+    totalProcessingTime = std::chrono::duration_cast<std::chrono::milliseconds>(totalEndTime - totalStartTime).count();
+    printf("\nTotal processing statistics:\n");
+    printf("Total time: %.3f seconds\n", totalProcessingTime / 1000.0);
+    printf("Total frames processed: %d\n", cond);
+    printf("Average processing time per frame: %.3f ms\n", totalProcessingTime / cond);
+    printf("Average FPS: %.2f\n", (cond * 1000.0) / totalProcessingTime);
+
+    printf("\nGood Bye!!!\n");
+
+    // 캡쳐 종료
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    ioctl(cam_fd, VIDIOC_STREAMOFF, &type);
+
+    // 메모리 정리
+    for (int i = 0; i < BUFFER_COUNT; i++)
+    {
+        munmap(buffers[i].start, buffers[i].length);
+    }
+    munmap(fbPtr, fbSize);
+    free(rgbBuffer);
+    free(aligned_input);
+
+    // 파일디스크립터 정리
+    close(cam_fd);
+    close(fb_fd);
+
+    return 0;
+}
+
 // YUYV 데이터를 RGB565로 변환하는 함수
 void yuyvToRgbaHost(uchar *yuyv, uchar4 *rgb, int width, int height)
 {
@@ -390,168 +565,6 @@ static int init_v4l2(int *fd, struct buffer *buffers)
         close(*fd);
         return -1;
     }
-
-    return 0;
-}
-
-int main(int argc, char **argv)
-{
-    uchar4 *rgbBuffer, *rgbBufferH, *fbPtr;
-    int cam_fd, fb_fd;
-    int fbSize; // YUYV는 픽셀당 2바이트
-    struct buffer buffers[BUFFER_COUNT];
-    struct v4l2_buffer buf; // V4L2에서 사용할 메모리 버퍼
-
-    signal(SIGINT, sigHandler);
-
-    DS_timer timer(5);
-    timer.setTimerName(0, (char *)"CUDA Total");
-    timer.setTimerName(1, (char *)"Computation(Kernel)");
-    timer.setTimerName(2, (char *)"Data Trans. : Host -> Device");
-    timer.setTimerName(3, (char *)"Data Trans. : Device -> Host");
-    timer.setTimerName(4, (char *)"Host Performance");
-    timer.initTimers();
-
-    // V4L2 초기화
-    if (init_v4l2(&cam_fd, buffers) < 0)
-    {
-        fprintf(stderr, "V4L2 initialization failed\n");
-        return -1;
-    }
-
-    // 프레임버퍼 초기화
-    fb_fd = init_framebuffer(&fbPtr, &fbSize);
-    if (fb_fd < 0)
-    {
-        fprintf(stderr, "Failed to initialize framebuffer\n");
-        return -1;
-    }
-
-    // 영상을 저장할 메모리 할당
-    printf("fbSize: %d\n", fbSize);
-    rgbBuffer = (uchar4 *)malloc(fbSize);
-    if (!rgbBuffer)
-    {
-        perror("Failed to allocate buffers");
-        close(fb_fd);
-        return -1;
-    }
-
-    rgbBufferH = (uchar4 *)malloc(fbSize);
-    if (!rgbBufferH)
-    {
-        perror("Failed to allocate buffers");
-        close(fb_fd);
-        return -1;
-    }
-
-    printf("vinfo.xres: %d\n", vinfo.xres);
-    printf("vinfo.yres: %d\n", vinfo.yres);
-    printf("width: %d\n", WIDTH);
-    printf("height %d\n", HEIGHT);
-
-    // FPS 측정을 위한 변수들
-    static int frameCount = 0;
-    static auto lastTime = std::chrono::high_resolution_clock::now();
-    static float fps = 0.0f;
-
-    // 전체 처리 시간 측정을 위한 변수
-    auto totalStartTime = std::chrono::high_resolution_clock::now();
-    double totalProcessingTime = 0.0;
-
-    // V4L2를 이용한 영상의 캡쳐 및 표시
-    while (cond)
-    {
-        if (cond >= 100)
-        {
-            break;
-        }
-
-        // 프레임 처리 시작 시간
-        auto frameStartTime = std::chrono::high_resolution_clock::now();
-
-        // 현재 시간 측정
-        auto currentTime = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastTime).count();
-
-        // 1초(1000ms)마다 FPS 계산
-        if (elapsed >= 1000)
-        {
-            fps = frameCount * (1000.0f / elapsed);
-            printf("FPS: %.2f\n", fps);
-            frameCount = 0;
-            lastTime = currentTime;
-        }
-
-        // 버퍼 초기화
-        memset(&buf, 0, sizeof(buf));
-
-        // MMAP 기반으로 영상 캡쳐
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-
-        // STREAMON 명령으로 캡쳐한 비디오 프레임을 디큐한다.
-        if (ioctl(cam_fd, VIDIOC_DQBUF, &buf) < 0)
-        {
-            perror("Failed to dequeue buffer");
-            break;
-        }
-
-        // init_v4l2함수에서 캡쳐한 비디오 프레임이 mmap(buffers[buf.index]).start에 저장되어있는데 이것을 인자로 넣어준다.
-        timer.onTimer(0);
-        cudaError_t cudaStatus = process_frame_cuda((uchar *)buffers[buf.index].start, rgbBuffer, timer);
-        if (cudaStatus != cudaSuccess)
-        {
-            fprintf(stderr, "addWithCuda failed!");
-            return 1;
-        }
-        timer.onTimer(4);
-        yuyvToRgbaHost((uchar *)buffers[buf.index].start, rgbBufferH, WIDTH, HEIGHT);
-        timer.offTimer(4);
-        timer.offTimer(0);
-
-        // memcpy(fbPtr, rgbBuffer, fbSize);
-        // saveImage("outputC.jpg", rgbBuffer, WIDTH, HEIGHT);
-        // saveImage("outputH.jpg", rgbBufferH, WIDTH, HEIGHT);
-
-        // 버퍼를 다시 큐에 넣기
-        if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0)
-        {
-            perror("Failed to queue buffer");
-            break;
-        }
-
-        frameCount++; // 프레임 카운터 증가
-        cond++;
-    }
-    timer.printTimer();
-
-    // 전체 처리 시간 계산 및 출력
-    auto totalEndTime = std::chrono::high_resolution_clock::now();
-    totalProcessingTime = std::chrono::duration_cast<std::chrono::milliseconds>(totalEndTime - totalStartTime).count();
-    printf("\nTotal processing statistics:\n");
-    printf("Total time: %.3f seconds\n", totalProcessingTime / 1000.0);
-    printf("Total frames processed: %d\n", cond);
-    printf("Average processing time per frame: %.3f ms\n", totalProcessingTime / cond);
-    printf("Average FPS: %.2f\n", (cond * 1000.0) / totalProcessingTime);
-
-    printf("\nGood Bye!!!\n");
-
-    // 캡쳐 종료
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(cam_fd, VIDIOC_STREAMOFF, &type);
-
-    // 메모리 정리
-    for (int i = 0; i < BUFFER_COUNT; i++)
-    {
-        munmap(buffers[i].start, buffers[i].length);
-    }
-    munmap(fbPtr, fbSize);
-    free(rgbBuffer);
-
-    // 파일디스크립터 정리
-    close(cam_fd);
-    close(fb_fd);
 
     return 0;
 }
